@@ -50,7 +50,16 @@
           v-if="!editingAttributeKey || editingAttributeKey !== attribute.key"
           class="flex items-center justify-between gap-1"
         >
-          <span class="sidebar-value break-all" v-if="attribute.data_type !== 'checkbox'">
+          <a
+            v-if="attribute.data_type === 'link' && customAttributes?.[attribute.key]"
+            :href="customAttributes[attribute.key]"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="sidebar-value break-all text-primary underline hover:no-underline"
+          >
+            {{ customAttributes[attribute.key] }}
+          </a>
+          <span v-else class="sidebar-value break-all">
             {{ customAttributes?.[attribute.key] ?? '-' }}
           </span>
           <div class="flex items-center gap-0.5 transition-opacity duration-200 flex-shrink-0 can-hover:opacity-0 can-hover:group-hover/item:opacity-100">
