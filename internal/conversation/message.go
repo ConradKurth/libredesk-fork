@@ -48,6 +48,12 @@ type fromNameVars struct {
 
 type fromNameAgent struct{ FirstName, LastName, FullName string }
 
+// outgoingMessageLeaseSecs is how long a claimed pending outgoing message stays
+// reserved (processing_at) before another replica may reclaim it. It must exceed
+// the worst-case send time so an in-flight send is never duplicated, while still
+// allowing recovery of messages claimed by a replica that crashed mid-send.
+const outgoingMessageLeaseSecs = 300
+
 type fromNameInbox struct{ Name string }
 
 // Run starts a pool of worker goroutines to handle message dispatching via inbox's channel and processes incoming messages. It scans for
@@ -77,23 +83,19 @@ func (m *Manager) Run(ctx context.Context, incomingQWorkers, outgoingQWorkers, s
 		case <-ctx.Done():
 			return
 		case <-dbScanner.C:
-			var (
-				pendingMessages = []models.Message{}
-				messageIDs      = m.getOutgoingProcessingMessageIDs()
-			)
+			var pendingMessages = []models.Message{}
 
-			// Get pending outgoing messages and skip the currently processing message ids.
-			if err := m.q.GetOutgoingPendingMessages.Select(&pendingMessages, pq.Array(messageIDs)); err != nil {
-				m.lo.Error("error fetching pending messages from db", "error", err)
+			// Atomically claim pending outgoing messages (stamps processing_at with
+			// FOR UPDATE SKIP LOCKED) so that across multiple app replicas each
+			// message is dispatched exactly once. The lease lets a message claimed
+			// by a crashed replica be reclaimed after it expires.
+			if err := m.q.ClaimOutgoingPendingMessages.Select(&pendingMessages, outgoingMessageLeaseSecs); err != nil {
+				m.lo.Error("error claiming pending messages from db", "error", err)
 				continue
 			}
 
-			// Prepare and push the message to the outgoing queue.
+			// Push each claimed message to the outgoing queue.
 			for _, message := range pendingMessages {
-				// Put the message ID in the processing map.
-				m.outgoingProcessingMessages.Store(message.ID, message.ID)
-
-				// Push the message to the outgoing message queue.
 				m.outgoingMessageQueue <- message
 			}
 		}
@@ -145,8 +147,6 @@ func (m *Manager) MessageSenderWorker(ctx context.Context) {
 
 // sendOutgoingMessage sends an outgoing message.
 func (m *Manager) sendOutgoingMessage(message models.Message) {
-	defer m.outgoingProcessingMessages.Delete(message.ID)
-
 	// Helper function to handle errors
 	handleError := func(err error, errorMsg string) bool {
 		if err != nil {
@@ -1163,7 +1163,7 @@ func (m *Manager) uploadMessageAttachments(message *models.Message) error {
 			attachment.Size,
 			null.StringFrom(attachment.Disposition),
 			[]byte("{}"), /** meta **/
-			true,          /** private **/
+			true,         /** private **/
 		)
 		if err != nil {
 			m.lo.Error("failed to upload attachment", "name", attachment.Name, "content_type", attachment.ContentType, "size", attachment.Size, "content_id", contentID, "disposition", attachment.Disposition, "conversation_uuid", message.ConversationUUID, "message_source_id", message.SourceID.String, "error", err)
@@ -1324,18 +1324,6 @@ func (m *Manager) attachAttachmentsToMessage(message *models.Message) error {
 	message.Attachments = attachments
 
 	return nil
-}
-
-// getOutgoingProcessingMessageIDs returns the IDs of outgoing messages currently being processed.
-func (m *Manager) getOutgoingProcessingMessageIDs() []int {
-	var out = make([]int, 0)
-	m.outgoingProcessingMessages.Range(func(key, _ any) bool {
-		if k, ok := key.(int); ok {
-			out = append(out, k)
-		}
-		return true
-	})
-	return out
 }
 
 // uploadThumbnailForMedia prepares and uploads a thumbnail for an image attachment.

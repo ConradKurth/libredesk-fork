@@ -694,7 +694,26 @@ and source_id > ''
 ORDER BY id DESC
 LIMIT $2;
 
--- name: get-outgoing-pending-messages
+-- name: claim-outgoing-pending-messages
+-- Atomically claims pending outgoing messages for this process by stamping
+-- processing_at, so that with multiple app replicas each message is sent exactly
+-- once. FOR UPDATE SKIP LOCKED stops two replicas grabbing the same row; the
+-- processing_at lease ($1 seconds) lets a message claimed by a crashed replica
+-- be reclaimed after it expires.
+WITH candidate AS (
+    SELECT m.id
+    FROM conversation_messages m
+    WHERE m.status = 'pending' AND m.type = 'outgoing' AND m.private = false
+      AND (m.processing_at IS NULL OR m.processing_at < NOW() - make_interval(secs => $1::int))
+    ORDER BY m.created_at
+    FOR UPDATE SKIP LOCKED
+),
+claimed AS (
+    UPDATE conversation_messages
+    SET processing_at = NOW()
+    WHERE id IN (SELECT id FROM candidate)
+    RETURNING id
+)
 SELECT
     m.id,
     m.created_at,
@@ -708,25 +727,20 @@ SELECT
     m.conversation_id,
     m.uuid,
     m.private,
-    m.sender_type,
     m.sender_id,
     m.meta,
-    c.uuid as conversation_uuid,
-    m.content_type,
     m.source_id,
-    m.meta,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'cc')) AS cc,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'bcc')) AS bcc,
     ARRAY(SELECT jsonb_array_elements_text(m.meta->'to')) AS to,
     c.inbox_id,
     c.uuid as conversation_uuid,
     c.subject,
-    c.contact_id as message_receiver_id,
-    c.subject
+    c.contact_id as message_receiver_id
 FROM conversation_messages m
 INNER JOIN conversations c ON c.id = m.conversation_id
-WHERE m.status = 'pending' AND m.type = 'outgoing' AND m.private = false
-AND NOT(m.id = ANY($1::INT[]))
+WHERE m.id IN (SELECT id FROM claimed)
+ORDER BY m.created_at
 
 -- name: get-message
 SELECT

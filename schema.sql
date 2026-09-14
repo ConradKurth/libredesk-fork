@@ -314,7 +314,8 @@ CREATE TABLE conversation_messages (
     source_id TEXT NULL,
  	sender_id BIGINT REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE NOT NULL,
     sender_type message_sender_type NOT NULL,
-    meta JSONB DEFAULT '{}'::JSONB NULL
+    meta JSONB DEFAULT '{}'::JSONB NULL,
+    processing_at TIMESTAMPTZ NULL
 );
 CREATE INDEX index_trgm_conversation_messages_on_text_content ON conversation_messages USING GIN (text_content gin_trgm_ops);
 CREATE INDEX index_conversation_messages_on_conversation_id ON conversation_messages (conversation_id);

@@ -82,33 +82,32 @@ var conversationListAllowedFields = dbutil.AllowedFields{
 
 // Manager handles the operations related to conversations
 type Manager struct {
-	q                          queries
-	inboxStore                 inboxStore
-	userStore                  userStore
-	teamStore                  teamStore
-	mediaStore                 mediaStore
-	statusStore                statusStore
-	priorityStore              priorityStore
-	slaStore                   slaStore
-	settingsStore              settingsStore
-	csatStore                  csatStore
-	webhookStore               webhookStore
-	dispatcher                 *notifier.Dispatcher
-	lo                         *logf.Logger
-	db                         *sqlx.DB
-	i18n                       *i18n.I18n
-	automation                 *automation.Engine
-	wsHub                      *ws.Hub
-	template                   *template.Manager
-	incomingMessageQueue       chan models.IncomingMessage
-	outgoingMessageQueue       chan models.Message
-	outgoingProcessingMessages sync.Map
-	closed                     bool
-	closedMu                   sync.RWMutex
-	wg                         sync.WaitGroup
-	continuityConfig           ContinuityConfig
-	subjectRefFormat           string
-	aiAgent                    AIAgentEngine
+	q                    queries
+	inboxStore           inboxStore
+	userStore            userStore
+	teamStore            teamStore
+	mediaStore           mediaStore
+	statusStore          statusStore
+	priorityStore        priorityStore
+	slaStore             slaStore
+	settingsStore        settingsStore
+	csatStore            csatStore
+	webhookStore         webhookStore
+	dispatcher           *notifier.Dispatcher
+	lo                   *logf.Logger
+	db                   *sqlx.DB
+	i18n                 *i18n.I18n
+	automation           *automation.Engine
+	wsHub                *ws.Hub
+	template             *template.Manager
+	incomingMessageQueue chan models.IncomingMessage
+	outgoingMessageQueue chan models.Message
+	closed               bool
+	closedMu             sync.RWMutex
+	wg                   sync.WaitGroup
+	continuityConfig     ContinuityConfig
+	subjectRefFormat     string
+	aiAgent              AIAgentEngine
 }
 
 // AIAgentEngine is notified when a conversation assigned to an AI assistant may need a response.
@@ -267,29 +266,28 @@ func New(
 	}
 
 	c := &Manager{
-		q:                          q,
-		wsHub:                      wsHub,
-		i18n:                       i18n,
-		dispatcher:                 dispatcher,
-		inboxStore:                 inboxStore,
-		userStore:                  userStore,
-		teamStore:                  teamStore,
-		mediaStore:                 mediaStore,
-		settingsStore:              settingsStore,
-		csatStore:                  csatStore,
-		webhookStore:               webhook,
-		slaStore:                   slaStore,
-		statusStore:                statusStore,
-		priorityStore:              priorityStore,
-		automation:                 automation,
-		template:                   template,
-		db:                         opts.DB,
-		lo:                         opts.Lo,
-		incomingMessageQueue:       make(chan models.IncomingMessage, opts.IncomingMessageQueueSize),
-		outgoingMessageQueue:       make(chan models.Message, opts.OutgoingMessageQueueSize),
-		outgoingProcessingMessages: sync.Map{},
-		continuityConfig:           continuityConfig,
-		subjectRefFormat:           subjectRefFormat,
+		q:                    q,
+		wsHub:                wsHub,
+		i18n:                 i18n,
+		dispatcher:           dispatcher,
+		inboxStore:           inboxStore,
+		userStore:            userStore,
+		teamStore:            teamStore,
+		mediaStore:           mediaStore,
+		settingsStore:        settingsStore,
+		csatStore:            csatStore,
+		webhookStore:         webhook,
+		slaStore:             slaStore,
+		statusStore:          statusStore,
+		priorityStore:        priorityStore,
+		automation:           automation,
+		template:             template,
+		db:                   opts.DB,
+		lo:                   opts.Lo,
+		incomingMessageQueue: make(chan models.IncomingMessage, opts.IncomingMessageQueueSize),
+		outgoingMessageQueue: make(chan models.Message, opts.OutgoingMessageQueueSize),
+		continuityConfig:     continuityConfig,
+		subjectRefFormat:     subjectRefFormat,
 	}
 
 	return c, nil
@@ -343,7 +341,7 @@ type queries struct {
 	// Message queries.
 	GetMessage                         *sqlx.Stmt `query:"get-message"`
 	GetMessages                        string     `query:"get-messages"`
-	GetOutgoingPendingMessages         *sqlx.Stmt `query:"get-outgoing-pending-messages"`
+	ClaimOutgoingPendingMessages       *sqlx.Stmt `query:"claim-outgoing-pending-messages"`
 	GetMessageSourceIDs                *sqlx.Stmt `query:"get-message-source-ids"`
 	GetConversationUUIDFromMessageUUID *sqlx.Stmt `query:"get-conversation-uuid-from-message-uuid"`
 	MessageExistsBySourceID            *sqlx.Stmt `query:"message-exists-by-source-id"`
