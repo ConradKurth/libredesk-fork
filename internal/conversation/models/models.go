@@ -323,6 +323,7 @@ type Message struct {
 	SenderType        string                 `db:"sender_type" json:"sender_type"`
 	InboxID           int                    `db:"inbox_id" json:"-"`
 	Meta              json.RawMessage        `db:"meta" json:"meta"`
+	ProcessingAt      null.Time              `db:"processing_at" json:"-"`
 	Attachments       attachment.Attachments `db:"attachments" json:"attachments"`
 	From              string                 `db:"from"  json:"-"`
 	Subject           string                 `db:"subject" json:"-"`
