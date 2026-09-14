@@ -858,9 +858,16 @@ inserted_msg AS (
        $1, $2, (SELECT id FROM conversation_id),
        $5, $6, $7, $8, $9, $10, $11, $12
    )
-   RETURNING *
+   -- Explicit column list (not RETURNING *) so adding a column to
+   -- conversation_messages can never break the scan into models.Message.
+   RETURNING id, created_at, updated_at, "uuid", "type", status, private,
+       conversation_id, content_type, "content", text_content, source_id,
+       sender_id, sender_type, meta, processing_at
 )
-SELECT * FROM inserted_msg;
+SELECT id, created_at, updated_at, "uuid", "type", status, private,
+    conversation_id, content_type, "content", text_content, source_id,
+    sender_id, sender_type, meta, processing_at
+FROM inserted_msg;
 
 -- name: message-exists-by-source-id
 SELECT conversation_id
