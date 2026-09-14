@@ -37,6 +37,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/abhinavxd/libredesk/internal/automation"
+	"github.com/abhinavxd/libredesk/internal/cluster"
 	contextlink "github.com/abhinavxd/libredesk/internal/context_link"
 	"github.com/abhinavxd/libredesk/internal/conversation"
 	"github.com/abhinavxd/libredesk/internal/conversation/priority"
@@ -95,6 +96,12 @@ const (
 	// wsBackplaneChannel is the Redis pub/sub channel over which WebSocket
 	// broadcasts are relayed between instances for multi-instance deployments.
 	wsBackplaneChannel = "libredesk:ws:broadcast"
+
+	// clusterLeaderKey is the Redis key holding the current leader's lease when
+	// cluster.enabled is set. Only the lease holder runs the singleton background
+	// jobs (see startLeaderJobs in Main), so a multi-instance deployment does not
+	// duplicate their side-effects.
+	clusterLeaderKey = "libredesk:cluster:leader"
 )
 
 // App is the global app context which is passed and injected in the http handlers.
@@ -278,24 +285,15 @@ func main() {
 	automation.SetSystemUserID(systemUser.ID)
 	conversation.SetAIAgent(aiAgent)
 
-	startInboxes(ctx, inbox, conversation, user, conversation.SignAvatarURL)
-
-	go automation.Run(ctx, automationWorkers)
-	go autoassigner.Run(ctx, autoAssignInterval)
-	go conversation.Run(ctx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
-	go conversation.RunUnsnoozer(ctx, unsnoozeInterval)
-	go conversation.RunContinuity(ctx)
+	// Worker pools that process work produced on this instance. They run on
+	// every replica: each task is enqueued and consumed within the same process,
+	// so nothing is duplicated across a multi-instance deployment. The singleton
+	// background jobs that must run on exactly one instance are started under
+	// leadership further below (see startLeaderJobs).
+	automation.Run(ctx, automationWorkers)
 	go webhook.Run(ctx)
 	go notifier.Run(ctx)
-	go sla.Run(ctx, slaEvaluationInterval)
-	go sla.SendNotifications(ctx)
-	go media.DeleteUnlinkedMedia(ctx)
-	go user.MonitorUserAvailability(ctx, onUsersOffline(conversation))
-	go conversation.RunDraftCleaner(ctx, draftRetentionDuration)
-	go userNotification.RunNotificationCleaner(ctx)
-	go helpCenter.RunSearchLogCleaner(ctx)
 	go aiAgent.Run(ctx, cmp.Or(ko.Int("ai_agent.worker_count"), 10))
-	go ai.Run(ctx)
 
 	var app = &App{
 		ctx:              ctx,
@@ -370,9 +368,42 @@ func main() {
 		}
 	}()
 
-	// Start the app update checker.
-	if ko.Bool("app.check_updates") {
-		go checkUpdates(versionString, time.Hour*1, app)
+	// Singleton background jobs: periodic scanners, external pollers (IMAP
+	// receivers), time-triggers and cleaners. Each must run on exactly one
+	// instance — running them on every replica would duplicate their external
+	// side-effects (double email sends, duplicate ticket ingestion, doubled
+	// notifications). They are started under leadership so they run once
+	// cluster-wide; when leadership is lost, leaderCtx is cancelled and every job
+	// stops. Handler-fed worker pools (started above) keep running on all replicas.
+	startLeaderJobs := func(leaderCtx context.Context) {
+		startInboxes(leaderCtx, inbox, conversation, user, conversation.SignAvatarURL)
+		go automation.RunTimeTriggers(leaderCtx)
+		go autoassigner.Run(leaderCtx, autoAssignInterval)
+		go conversation.Run(leaderCtx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
+		go conversation.RunUnsnoozer(leaderCtx, unsnoozeInterval)
+		go conversation.RunContinuity(leaderCtx)
+		go sla.Run(leaderCtx, slaEvaluationInterval)
+		go sla.SendNotifications(leaderCtx)
+		go media.DeleteUnlinkedMedia(leaderCtx)
+		go user.MonitorUserAvailability(leaderCtx, onUsersOffline(conversation))
+		go conversation.RunDraftCleaner(leaderCtx, draftRetentionDuration)
+		go userNotification.RunNotificationCleaner(leaderCtx)
+		go helpCenter.RunSearchLogCleaner(leaderCtx)
+		go ai.Run(leaderCtx)
+		if ko.Bool("app.check_updates") {
+			go checkUpdates(versionString, time.Hour*1, app)
+		}
+	}
+
+	if ko.Bool("cluster.enabled") {
+		// Multi-instance: contend for leadership. startLeaderJobs runs only while
+		// this instance holds the lease; all replicas keep serving HTTP/WS.
+		leaseTTL := cmp.Or(ko.Duration("cluster.lease_ttl"), cluster.DefaultLeaseTTL)
+		coordinator := cluster.New(rdb, clusterLeaderKey, leaseTTL, initLogger("cluster"))
+		go coordinator.Run(ctx, startLeaderJobs)
+	} else {
+		// Single-instance (default): run every background job directly.
+		startLeaderJobs(ctx)
 	}
 
 	// Wait for shutdown signal.
