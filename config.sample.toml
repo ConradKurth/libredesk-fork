@@ -94,6 +94,19 @@ user = ""
 password = ""
 db = 0
 
+[cluster]
+# Multi-instance coordination. Leave disabled when running a single instance
+# (the default). When enabled, exactly one instance is elected leader via a Redis
+# lease and runs the singleton background jobs (IMAP receivers, outgoing-mail
+# scanner, SLA/automation time-triggers, cleaners); every instance keeps serving
+# HTTP and WebSocket traffic. This prevents duplicated side-effects (double email
+# sends, duplicate ticket ingestion) when running more than one replica.
+# Requires Redis (configured above).
+enabled = false
+# Leadership lease lifetime. If the leader dies, a standby takes over after at
+# most this long. Renewed every third of this interval. Leave empty for 15s.
+lease_ttl = "15s"
+
 [message]
 # Number of workers processing outgoing message queue
 outgoing_queue_workers = 10

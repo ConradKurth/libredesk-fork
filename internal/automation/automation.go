@@ -123,19 +123,27 @@ func (e *Engine) ReloadRules() {
 	e.rules = e.queryRules()
 }
 
-// Run starts the Engine with a worker pool to evaluate rules based on events.
+// Run starts the Engine's worker pool that evaluates rules for events produced
+// on this instance. It returns once the workers are spawned.
+//
+// It is safe to run on every instance of a multi-instance deployment: each event
+// is enqueued and consumed within the same process, so no rule evaluation is
+// duplicated. Time-based triggers are deliberately NOT started here — see
+// RunTimeTriggers, which must run on exactly one instance.
 func (e *Engine) Run(ctx context.Context, workerCount int) {
-	// Spawn worker pool.
 	for i := 0; i < workerCount; i++ {
 		e.wg.Add(1)
 		go e.worker(ctx)
 	}
+}
 
-	// Hourly ticker for timed triggers.
+// RunTimeTriggers periodically enqueues time-based rule evaluation. In a
+// multi-instance deployment it must run on exactly one instance (the elected
+// leader); running it everywhere would fire every timed automation once per
+// instance. It blocks until ctx is cancelled.
+func (e *Engine) RunTimeTriggers(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Hour)
-	defer func() {
-		ticker.Stop()
-	}()
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -143,7 +151,11 @@ func (e *Engine) Run(ctx context.Context, workerCount int) {
 			return
 		case <-ticker.C:
 			e.lo.Info("queuing time triggers")
-			e.taskQueue <- ConversationTask{taskType: TimeTrigger}
+			select {
+			case e.taskQueue <- ConversationTask{taskType: TimeTrigger}:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
