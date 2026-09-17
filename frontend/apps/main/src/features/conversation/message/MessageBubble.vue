@@ -105,7 +105,12 @@
               >
                 {{ sanitizedContent }}
               </div>
-              <div v-else ref="messageContentEl" @click="onMessageContentClick">
+              <div
+                v-else
+                ref="messageContentEl"
+                :class="{ 'email-canvas': isIncomingHtml }"
+                @click="onMessageContentClick"
+              >
                 <Letter
                   :html="sanitizedContent"
                   :allowedSchemas="['cid', 'https', 'http', 'mailto']"
@@ -123,7 +128,9 @@
                     ? 'bg-gradient-to-t from-private via-private/90 to-transparent'
                     : isOutgoing
                       ? 'bg-gradient-to-t from-secondary via-secondary/90 to-transparent'
-                      : 'bg-gradient-to-t from-background via-background/90 to-transparent'
+                      : isIncomingHtml
+                        ? 'bg-gradient-to-t from-white via-white/90 to-transparent'
+                        : 'bg-gradient-to-t from-background via-background/90 to-transparent'
                 "
               >
                 <button
@@ -354,6 +361,12 @@ const aiAssistantRoute = computed(() => {
 
 const isOutgoing = computed(() => props.direction === 'outgoing')
 
+// Incoming HTML emails carry sender styles (often inline black text) that assume
+// a white page; render them on a white canvas so they stay readable in dark mode.
+const isIncomingHtml = computed(
+  () => !isOutgoing.value && props.message.content_type !== 'text'
+)
+
 const getFullName = computed(() => {
   const author = props.message.author ?? {}
   const firstName = author.first_name ?? 'User'
@@ -470,5 +483,20 @@ const showEnvelope = computed(() => {
   max-width: 100%;
   height: auto;
   cursor: zoom-in;
+}
+
+// Incoming email bodies render on a fixed white canvas (theme-independent) so
+// sender HTML that assumes a white page — e.g. Outlook forwards with inline
+// black text — stays readable in dark mode. Sender inline colors still win;
+// this only sets the fallbacks for otherwise-uncolored text and links.
+.email-canvas {
+  background: #ffffff;
+  color: #1a1a1a;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+
+  :deep(a) {
+    color: #0b57d0;
+  }
 }
 </style>
