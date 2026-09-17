@@ -460,6 +460,11 @@ func (m *Manager) isAssistantUser(userID int) bool {
 	return m.assistantUserIDs[userID]
 }
 
+// IsAssistantUser reports whether userID is the identity user of an AI assistant.
+func (m *Manager) IsAssistantUser(userID int) bool {
+	return m.isAssistantUser(userID)
+}
+
 func buildStats(rangeDays int, cur, prev models.StatWindow) models.AssistantStats {
 	s := models.AssistantStats{
 		RangeDays:      rangeDays,

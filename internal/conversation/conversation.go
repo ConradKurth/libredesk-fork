@@ -130,6 +130,8 @@ type AIAgentEngine interface {
 	HandleConversationEvent(conversationID, assigneeUserID int)
 	HandleConversationResolved(conversationID int)
 	AssistantExpectation(userID int) string
+	// IsAssistantUser reports whether the user id is an AI assistant's identity user.
+	IsAssistantUser(userID int) bool
 }
 
 // SetAIAgent wires the AI agent engine after construction to avoid an import cycle.
