@@ -67,8 +67,8 @@ const updateCustomAttribute = (id, data) =>
     }
   })
 const deleteCustomAttribute = (id) => http.delete(`/api/v1/custom-attributes/${id}`)
-const searchConversations = (params) => http.get('/api/v1/conversations/search', { params })
-const searchMessages = (params) => http.get('/api/v1/messages/search', { params })
+const searchConversations = (params) => http.get('/api/v1/search/conversations', { params })
+const searchMessages = (params) => http.get('/api/v1/search/messages', { params })
 const searchContacts = (params) => http.get('/api/v1/contacts/search', { params })
 const getEmailNotificationSettings = () => http.get('/api/v1/settings/notifications/email')
 const updateEmailNotificationSettings = (data) =>
@@ -204,6 +204,12 @@ const updateRole = (id, data) =>
 const deleteRole = (id) => http.delete(`/api/v1/roles/${id}`)
 const getContacts = (params) => http.get('/api/v1/contacts', { params })
 const getContact = (id) => http.get(`/api/v1/contacts/${id}`)
+const createContact = (data) =>
+  http.post('/api/v1/contacts', data, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  })
 const updateContact = (id, data) =>
   http.put(`/api/v1/contacts/${id}`, data, {
     headers: {
@@ -229,7 +235,7 @@ const createTeam = (data) => http.post('/api/v1/teams', data, {
     'Content-Type': 'application/json'
   }
 })
-const getTeamsCompact = () => http.get('/api/v1/teams/compact')
+const getTeamsCompact = (params) => http.get('/api/v1/teams/compact', { params })
 const deleteTeam = (id) => http.delete(`/api/v1/teams/${id}`)
 const updateUser = (id, data) =>
   http.put(`/api/v1/agents/${id}`, data, {
@@ -238,7 +244,7 @@ const updateUser = (id, data) =>
     }
   })
 const getUsers = () => http.get('/api/v1/agents')
-const getUsersCompact = () => http.get('/api/v1/agents/compact')
+const getUsersCompact = (params) => http.get('/api/v1/agents/compact', { params })
 const updateCurrentUser = (data) =>
   http.put('/api/v1/agents/me', data, {
     headers: {
@@ -278,7 +284,7 @@ const createUser = (data) =>
       'Content-Type': 'application/json'
     }
   })
-const getTags = () => http.get('/api/v1/tags')
+const getTags = (params) => http.get('/api/v1/tags', { params })
 const importTags = (data) =>
   http.post('/api/v1/tags/import', data, {
     headers: {
@@ -349,7 +355,8 @@ const getConversation = (uuid) => http.get(`/api/v1/conversations/${uuid}`, { ab
 const getConversationTranscript = (uuid) =>
   http.get(`/api/v1/conversations/${uuid}/transcript`, { responseType: 'blob' })
 const getContactPageVisits = (uuid) => http.get(`/api/v1/conversations/${uuid}/page-visits`, { abortOnRoute: true })
-const getAllMacros = () => http.get('/api/v1/macros')
+const getMacrosCompact = (params) => http.get('/api/v1/macros/compact', { params })
+const searchMacros = (params) => http.get('/api/v1/macros/search', { params })
 const getMacro = (id) => http.get(`/api/v1/macros/${id}`)
 const createMacro = (data) =>
   http.post('/api/v1/macros', data, {
@@ -380,6 +387,8 @@ const getAllConversations = (params) =>
   http.get('/api/v1/conversations/all', { params, abortOnRoute: true })
 const getMentionedConversations = (params) =>
   http.get('/api/v1/conversations/mentioned', { params, abortOnRoute: true })
+const getSidebarCounts = () => http.get('/api/v1/conversations/sidebar-counts')
+const getViewCount = (id) => http.get(`/api/v1/views/${id}/count`)
 const getViewConversations = (id, params) =>
   http.get(`/api/v1/views/${id}/conversations`, { params, abortOnRoute: true })
 const uploadMedia = (data) =>
@@ -456,6 +465,10 @@ const updateSharedView = (id, data) =>
 const deleteSharedView = (id) => http.delete(`/api/v1/shared-views/${id}`)
 
 const getAiPrompts = () => http.get('/api/v1/ai/prompts')
+const getAIPrompt = (id) => http.get(`/api/v1/ai/prompts/${id}`)
+const createAIPrompt = (data) => http.post('/api/v1/ai/prompts', data)
+const updateAIPrompt = (id, data) => http.put(`/api/v1/ai/prompts/${id}`, data)
+const deleteAIPrompt = (id) => http.delete(`/api/v1/ai/prompts/${id}`)
 const aiCompletion = (data) => http.post('/api/v1/ai/completion', data, {
   timeout: AI_TIMEOUT,
   headers: {
@@ -610,6 +623,10 @@ const markNotificationAsRead = (id) => http.put(`/api/v1/notifications/${id}/rea
 const markAllNotificationsAsRead = () => http.put('/api/v1/notifications/read-all')
 const deleteNotification = (id) => http.delete(`/api/v1/notifications/${id}`)
 const deleteAllNotifications = () => http.delete('/api/v1/notifications')
+const getNotificationPreferences = () => http.get('/api/v1/notifications/preferences')
+const updateNotificationPreferences = (data) => http.put('/api/v1/notifications/preferences', data)
+const createPushSubscription = (data) => http.post('/api/v1/notifications/push-subscriptions', data)
+const deletePushSubscription = (endpoint) => http.delete('/api/v1/notifications/push-subscriptions', { data: { endpoint } })
 
 export default {
   login,
@@ -652,6 +669,8 @@ export default {
   getUnassignedConversations,
   getAllConversations,
   getMentionedConversations,
+  getSidebarCounts,
+  getViewCount,
   getTeamUnassignedConversations,
   getViewConversations,
   getOverviewCharts,
@@ -665,7 +684,8 @@ export default {
   getConversationTranscript,
   getCurrentUser,
   getCurrentUserTeams,
-  getAllMacros,
+  getMacrosCompact,
+  searchMacros,
   getMacro,
   createMacro,
   updateMacro,
@@ -740,6 +760,10 @@ export default {
   updateSharedView,
   deleteSharedView,
   getAiPrompts,
+  getAIPrompt,
+  createAIPrompt,
+  updateAIPrompt,
+  deleteAIPrompt,
   aiCompletion,
   getAIConfig,
   updateAIConfig,
@@ -802,6 +826,7 @@ export default {
   removeAssignee,
   getContacts,
   getContact,
+  createContact,
   updateContact,
   blockContact,
   deleteContact,
@@ -840,5 +865,9 @@ export default {
   markAllNotificationsAsRead,
   deleteNotification,
   deleteAllNotifications,
+  getNotificationPreferences,
+  updateNotificationPreferences,
+  createPushSubscription,
+  deletePushSubscription,
   getContactPageVisits
 }

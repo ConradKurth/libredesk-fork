@@ -84,6 +84,8 @@ type queries struct {
 	GetUserIDsByRole              *sqlx.Stmt `query:"get-user-ids-by-role"`
 	GetUserByExternalID           *sqlx.Stmt `query:"get-user-by-external-id"`
 	GetUsersCompact               string     `query:"get-users-compact"`
+	GetAgentsCompact              *sqlx.Stmt `query:"get-agents-compact"`
+	GetAgentsCompactByIDs         *sqlx.Stmt `query:"get-agents-compact-by-ids"`
 	UpdateContact                 *sqlx.Stmt `query:"update-contact"`
 	UpdateContactBasicInfo        *sqlx.Stmt `query:"update-contact-basic-info"`
 	UpdateAgent                   *sqlx.Stmt `query:"update-agent"`
@@ -104,6 +106,7 @@ type queries struct {
 	InsertContactWithExtID        *sqlx.Stmt `query:"insert-contact-with-external-id"`
 	InsertContactNoExtID          *sqlx.Stmt `query:"insert-contact-without-external-id"`
 	InsertContactIfAbsent         *sqlx.Stmt `query:"insert-contact-if-absent"`
+	InsertContact                 *sqlx.Stmt `query:"insert-contact"`
 	GetContactByEmail             *sqlx.Stmt `query:"get-contact-by-email"`
 	GetContactByEmailWithoutExtID *sqlx.Stmt `query:"get-contact-by-email-without-ext-id"`
 	IsEmailBlocked                *sqlx.Stmt `query:"is-email-blocked"`

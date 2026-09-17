@@ -113,7 +113,8 @@
               >
                 <Letter
                   :html="sanitizedContent"
-                  :allowedSchemas="['cid', 'https', 'http', 'mailto']"
+                  :allowedSchemas="allowedSchemas"
+                  :rewriteExternalLinks="rewriteMessageLink"
                   :allowed-css-properties="extendedCssProperties"
                   class="mb-1 native-html break-words"
                   :class="{ 'mb-3': message.attachments.length > 0 }"
@@ -169,7 +170,22 @@
             <!-- Status Icons (outgoing only) -->
             <div v-if="isOutgoing" class="flex items-center space-x-2 mt-2 self-end">
               <Lock :size="12" v-if="isPrivateMessage" class="text-muted-foreground" />
-              <Check :size="14" v-if="showCheckCheck" class="text-success" />
+              <Tooltip v-if="isReadByContact">
+                <TooltipTrigger>
+                  <CheckCheck :size="14" class="text-success" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{{ t('globals.terms.read') }}</p>
+                </TooltipContent>
+              </Tooltip>
+              <Tooltip v-else-if="isDelivered">
+                <TooltipTrigger>
+                  <Check :size="14" class="text-success" />
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>{{ t('globals.terms.sent') }}</p>
+                </TooltipContent>
+              </Tooltip>
               <Tooltip v-if="message.meta?.continuity_emailed">
                 <TooltipTrigger>
                   <Mail :size="12" class="text-muted-foreground" />
@@ -261,7 +277,7 @@ import { computed, ref, onMounted, nextTick } from 'vue'
 import { useConversationStore } from '@main/stores/conversation'
 import { useUserStore } from '@main/stores/user'
 import { useI18n } from 'vue-i18n'
-import { Lock, Mail, RotateCcw, Check, Maximize2, Trash2, MoreHorizontal } from 'lucide-vue-next'
+import { Lock, Mail, RotateCcw, Check, CheckCheck, Maximize2, Trash2, MoreHorizontal } from 'lucide-vue-next'
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -382,6 +398,14 @@ const avatarFallback = computed(() => {
   return firstName.toUpperCase().substring(0, 2)
 })
 
+const allowedSchemas = ['cid', 'https', 'http', 'mailto']
+
+// vue-letter skips its own href schema check once a rewrite hook is set.
+const rewriteMessageLink = (href) => {
+  if (href.startsWith('/') && !href.startsWith('//')) return `${window.location.origin}${href}`
+  return allowedSchemas.includes(href.toLowerCase().split(':')[0]) ? href : ''
+}
+
 const sanitizedContent = computed(() => {
   if (props.message.meta?.is_csat) {
     return t('globals.messages.pleaseRateConversation')
@@ -411,9 +435,16 @@ const canDeleteNote = computed(
     !isDeleted.value &&
     (props.message.sender_id === userStore.userID || userStore.hasAdminRole)
 )
-const showCheckCheck = computed(
+const isDelivered = computed(
   () => isOutgoing.value && props.message.status === 'sent' && !isPrivateMessage.value
 )
+const isReadByContact = computed(() => {
+  const conversation = convStore.current
+  const lastSeenAt = conversation?.contact_last_seen_at
+  const isLiveChat = conversation?.inbox_channel === 'livechat'
+  if (!isDelivered.value || !lastSeenAt || !isLiveChat) return false
+  return new Date(props.message.created_at) <= new Date(lastSeenAt)
+})
 const showRetry = computed(() => isOutgoing.value && props.message.status === 'failed' && props.message.sender_id === userStore.userID)
 
 const retryMessage = (msg) => {

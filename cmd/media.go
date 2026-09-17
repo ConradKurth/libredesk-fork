@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -25,6 +27,12 @@ import (
 
 // immutable suppresses revalidation, so this is how long a revoked file stays reachable from a client cache.
 const mediaCacheTTL = 24 * time.Hour
+
+type preparedImageUpload struct {
+	thumbnail    *bytes.Reader
+	meta         []byte
+	thumbnailErr error
+}
 
 // handleMediaUpload handles media uploads.
 func handleMediaUpload(r *fastglue.Request) error {
@@ -123,29 +131,24 @@ func handleMediaUpload(r *fastglue.Request) error {
 	// Generate and upload thumbnail and store image dimensions in the media meta.
 	var meta = []byte("{}")
 	if slices.Contains(image.Exts, srcExt) && image.IsImageByContent(file) {
-		file.Seek(0, 0)
-		thumbFile, err := image.CreateThumb(image.DefThumbSize, file)
-		if err != nil {
-			app.lo.Error("error creating thumb image", "error", err)
-			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.somethingWentWrong"), nil, envelope.GeneralError)
-		}
-		thumbName, _, err = app.media.Upload(thumbName, srcContentType, thumbFile)
-		if err != nil {
-			return sendErrorEnvelope(r, err)
-		}
-
-		// Store image dimensions in media meta, storing dimensions for image previews in future.
-		file.Seek(0, 0)
-		width, height, err := image.GetDimensions(file)
+		prepared, err := prepareImageUpload(file)
 		if err != nil {
 			cleanUp = true
 			app.lo.Error("error getting image dimensions", "error", err)
 			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, app.i18n.T("globals.messages.errorUploadingFile"), nil, envelope.GeneralError)
 		}
-		meta, _ = json.Marshal(map[string]interface{}{
-			"width":  width,
-			"height": height,
-		})
+		if prepared.thumbnailErr != nil {
+			app.lo.Error("error creating thumb image", "error", prepared.thumbnailErr)
+		} else {
+			// A failed upload returns an empty name, keep the original so cleanup can delete a partial file.
+			uploadedThumb, _, err := app.media.Upload(thumbName, srcContentType, prepared.thumbnail)
+			if err != nil {
+				cleanUp = true
+				return sendErrorEnvelope(r, err)
+			}
+			thumbName = uploadedThumb
+		}
+		meta = prepared.meta
 	}
 
 	// Reset ptr.
@@ -320,4 +323,27 @@ func cacheVisibility(private bool) string {
 		return "private"
 	}
 	return "public"
+}
+
+func prepareImageUpload(file io.ReadSeeker) (preparedImageUpload, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return preparedImageUpload{}, err
+	}
+	thumbnail, thumbnailErr := image.CreateThumb(image.DefThumbSize, file)
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return preparedImageUpload{}, err
+	}
+	width, height, err := image.GetDimensions(file)
+	if err != nil {
+		return preparedImageUpload{}, err
+	}
+	meta, err := json.Marshal(map[string]any{
+		"width":  width,
+		"height": height,
+	})
+	if err != nil {
+		return preparedImageUpload{}, err
+	}
+	return preparedImageUpload{thumbnail: thumbnail, meta: meta, thumbnailErr: thumbnailErr}, nil
 }

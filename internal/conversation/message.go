@@ -246,7 +246,7 @@ func (m *Manager) BuildTemplateData(conversationUUID string, senderID int) (map[
 		return nil, fmt.Errorf("fetching conversation: %w", err)
 	}
 
-	sender, err := m.userStore.GetAgent(senderID, "")
+	sender, err := m.userStore.GetAgentCachedOrLoad(senderID)
 	if err != nil {
 		return nil, fmt.Errorf("fetching message sender user: %w", err)
 	}
@@ -476,7 +476,9 @@ func (m *Manager) SendPrivateNote(media []mmodels.Media, senderID int, conversat
 }
 
 // CreateContactMessage creates a contact message in a conversation.
-func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, conversationUUID, content, contentType string, isNewConversation bool) (models.Message, error) {
+// sourceID is the bare RFC 5322 Message-ID of the inbound message; it is normalized and stored on the message so replies thread on it, mirroring the IMAP ingestion path. Empty leaves the column NULL.
+func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, conversationUUID, content, contentType string, isNewConversation bool, sourceID string) (models.Message, error) {
+	sourceID = stringutil.NormalizeMessageID(sourceID)
 	message := models.Message{
 		ConversationUUID: conversationUUID,
 		SenderID:         contactID,
@@ -487,13 +489,14 @@ func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, con
 		ContentType:      contentType,
 		Private:          false,
 		Media:            media,
+		SourceID:         null.NewString(sourceID, sourceID != ""),
 	}
 	if err := m.InsertMessage(&message); err != nil {
 		return models.Message{}, err
 	}
 
 	// Process post-message hooks (reopen, waiting since, automation, SLA).
-	if err := m.ProcessIncomingMessageHooks(conversationUUID, isNewConversation); err != nil {
+	if err := m.ProcessIncomingMessageHooks(message, isNewConversation); err != nil {
 		m.lo.Error("error processing incoming message hooks", "conversation_uuid", conversationUUID, "error", err)
 	}
 
@@ -678,11 +681,24 @@ func (m *Manager) RecordAssigneeUserChange(conversationUUID string, assigneeID i
 	}
 
 	// Assignment to another user.
-	assignee, err := m.userStore.GetAgent(assigneeID, "")
+	assignee, err := m.userStore.GetAgentCachedOrLoad(assigneeID)
 	if err != nil {
 		return err
 	}
 	return m.InsertConversationActivity(models.ActivityAssignedUserChange, conversationUUID, assignee.FullName(), actor)
+}
+
+// RecordAssigneeUserRemoval records an activity for the removal of a user assignee.
+func (m *Manager) RecordAssigneeUserRemoval(conversationUUID string, assigneeID int, actor umodels.User) error {
+	if assigneeID == actor.ID {
+		return m.InsertConversationActivity(models.ActivitySelfUnassign, conversationUUID, actor.FullName(), actor)
+	}
+
+	assignee, err := m.userStore.GetAgentCachedOrLoad(assigneeID)
+	if err != nil {
+		return err
+	}
+	return m.InsertConversationActivity(models.ActivityAssigneeUserRemoved, conversationUUID, assignee.FullName(), actor)
 }
 
 // RecordAssigneeTeamChange records an activity for a team assignee change.
@@ -767,8 +783,12 @@ func (m *Manager) getMessageActivityContent(activityType, newValue, actorName st
 		content = fmt.Sprintf("Assigned to %s by %s", newValue, actorName)
 	case models.ActivityAssignedTeamChange:
 		content = fmt.Sprintf("Assigned to %s team by %s", newValue, actorName)
+	case models.ActivityAssigneeUserRemoved:
+		content = fmt.Sprintf("%s removed %s as assignee", actorName, newValue)
 	case models.ActivitySelfAssign:
 		content = fmt.Sprintf("%s self-assigned this conversation", actorName)
+	case models.ActivitySelfUnassign:
+		content = fmt.Sprintf("%s unassigned themselves", actorName)
 	case models.ActivityPriorityChange:
 		content = fmt.Sprintf("%s set priority to %s", actorName, newValue)
 	case models.ActivityStatusChange:
@@ -873,7 +893,7 @@ func (m *Manager) ProcessIncomingMessage(in models.IncomingMessage) (models.Mess
 	m.broadcastMessageToWidgetClients(&msg)
 
 	// Process post-message hooks (automation rules, webhooks, SLA, etc.).
-	if err := m.ProcessIncomingMessageHooks(msg.ConversationUUID, isNewConversation); err != nil {
+	if err := m.ProcessIncomingMessageHooks(msg, isNewConversation); err != nil {
 		m.lo.Error("error processing incoming message hooks", "conversation_uuid", msg.ConversationUUID, "error", err)
 		return models.Message{}, fmt.Errorf("processing incoming message hooks: %w", err)
 	}
@@ -995,7 +1015,7 @@ func (m *Manager) ProcessIncomingLiveChatMessage(msg models.Message) (models.Mes
 
 	// Process post-message hooks (automation rules, webhooks, SLA, etc.).
 	// isNewConversation = false since conversation always exists for live chat.
-	if err := m.ProcessIncomingMessageHooks(msg.ConversationUUID, false); err != nil {
+	if err := m.ProcessIncomingMessageHooks(msg, false); err != nil {
 		m.lo.Error("error processing incoming message hooks", "conversation_uuid", msg.ConversationUUID, "error", err)
 	}
 
@@ -1354,10 +1374,11 @@ func (m *Manager) uploadThumbnailForMedia(media mmodels.Media, content []byte) e
 // ProcessIncomingMessageHooks handles automation rules, webhooks, SLA events, and other post-processing
 // for incoming messages. This allows other channels to insert messages first and then call this
 // function to trigger the necessary hooks.
-func (m *Manager) ProcessIncomingMessageHooks(conversationUUID string, isNewConversation bool) error {
+func (m *Manager) ProcessIncomingMessageHooks(message models.Message, isNewConversation bool) error {
+	conversationUUID := message.ConversationUUID
+
 	// Start waiting since clock, cleared when agent replies.
-	now := time.Now()
-	m.UpdateConversationWaitingSince(conversationUUID, &now)
+	m.StartConversationWaitingSince(conversationUUID, time.Now())
 
 	// Handle new conversation events.
 	if isNewConversation {
@@ -1376,11 +1397,13 @@ func (m *Manager) ProcessIncomingMessageHooks(conversationUUID string, isNewConv
 	}
 
 	// Reopen conversation if it's not Open.
+	var reopened bool
 	systemUser, err := m.userStore.GetSystemUser()
 	if err != nil {
 		m.lo.Error("error fetching system user", "error", err)
 	} else {
-		if err := m.ReOpenConversation(conversationUUID, systemUser); err != nil {
+		var err error
+		if reopened, err = m.ReOpenConversation(conversationUUID, systemUser); err != nil {
 			m.lo.Error("error reopening conversation", "error", err)
 		}
 	}
@@ -1393,6 +1416,8 @@ func (m *Manager) ProcessIncomingMessageHooks(conversationUUID string, isNewConv
 	} else {
 		// Trigger automations on incoming message event.
 		m.automation.EvaluateConversationUpdateRules(conversation, amodels.EventConversationMessageIncoming, previousValues, umodels.User{ID: conversation.ContactID})
+
+		go m.NotifyNewReply(conversation, message, reopened)
 
 		// If assigned to an AI assistant, let it respond to this inbound customer message.
 		if m.aiAgent != nil && conversation.AssignedUserID.Valid {

@@ -27,6 +27,8 @@ Visit [libredesk.io](https://libredesk.io) for more info. Check out the [**live 
   Live chat and email in one inbox. Every conversation lands in the same place, whichever channel it came from.
 - **Live chat widget**  
   Embed a real-time chat widget on your website. Replies go out from the same inbox your team already works in.
+- **Help center**  
+  Publish a searchable knowledge base with collections, articles in multiple languages, and customize it however you want.  
 - **AI assistant**  
   Answer live chat conversations automatically with an AI assistant grounded in your knowledge base. Hands off to a human when it can't help.
 - **Agent copilot**  

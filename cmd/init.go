@@ -39,6 +39,7 @@ import (
 	fs "github.com/abhinavxd/libredesk/internal/media/stores/localfs"
 	"github.com/abhinavxd/libredesk/internal/media/stores/s3"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
+	notificationchannels "github.com/abhinavxd/libredesk/internal/notification/channels"
 	emailnotifier "github.com/abhinavxd/libredesk/internal/notification/providers/email"
 	"github.com/abhinavxd/libredesk/internal/oidc"
 	"github.com/abhinavxd/libredesk/internal/ratelimit"
@@ -860,7 +861,8 @@ func reloadAuth(app *App) error {
 	app.lo.Info("reloading auth manager")
 	providers, err := buildProviders(app.oidc)
 	if err != nil {
-		log.Fatalf("error reloading auth: %v", err)
+		app.lo.Error("error reloading auth", "error", err)
+		return err
 	}
 	if err := app.auth.Reload(auth_.Config{Providers: providers}); err != nil {
 		app.lo.Error("error reloading auth", "error", err)
@@ -885,7 +887,7 @@ func buildProviders(o *oidc.Manager) ([]auth_.Provider, error) {
 			ID:           config.ID,
 			Provider:     config.Provider,
 			ProviderURL:  config.ProviderURL,
-			RedirectURL:  config.RedirectURI,
+			RedirectURL:  func() (string, error) { return o.RedirectURL(config.ID) },
 			ClientID:     config.ClientID,
 			ClientSecret: config.ClientSecret,
 		})
@@ -1059,12 +1061,15 @@ func initAIAgent(db *sqlx.DB, i18n *i18n.I18n, aiManager *ai.Manager, convo *con
 }
 
 // initSearch inits search manager.
-func initSearch(db *sqlx.DB, i18n *i18n.I18n) *search.Manager {
+func initSearch(db *sqlx.DB, i18n *i18n.I18n, convo *conversation.Manager) *search.Manager {
 	lo := initLogger("search")
 	m, err := search.New(search.Opts{
-		DB:   db,
-		Lo:   lo,
-		I18n: i18n,
+		DB:              db,
+		Lo:              lo,
+		I18n:            i18n,
+		FilterFields:    conversation.ListFilterAllowedFields,
+		FilterRenderers: conversation.ListFilterRenderers,
+		FilterLocation:  convo.FilterLocation,
 	})
 	if err != nil {
 		log.Fatalf("error initializing search manager: %v", err)
@@ -1162,6 +1167,19 @@ func initUserNotification(db *sqlx.DB, i18n *i18n.I18n) *notifier.UserNotificati
 	return m
 }
 
+// initNotificationPreference inits the notification preference manager.
+func initNotificationPreference(db *sqlx.DB, i18n *i18n.I18n) *notifier.PreferenceManager {
+	m, err := notifier.NewPreferenceManager(notifier.PreferenceManagerOpts{
+		DB:   db,
+		Lo:   initLogger("notification-preference"),
+		I18n: i18n,
+	})
+	if err != nil {
+		log.Fatalf("error initializing notification preference manager: %v", err)
+	}
+	return m
+}
+
 // initImporter inits the importer manager.
 func initImporter(i18n *i18n.I18n) *importer.Importer {
 	return importer.New(importer.Opts{
@@ -1170,14 +1188,46 @@ func initImporter(i18n *i18n.I18n) *importer.Importer {
 	})
 }
 
+func initNotificationEmailQueue(db *sqlx.DB, outbound *notifier.Service) *notifier.EmailQueue {
+	q, err := notifier.NewEmailQueue(notifier.EmailQueueOpts{
+		DB:       db,
+		Outbound: outbound,
+		Lo:       initLogger("notification-email-queue"),
+	})
+	if err != nil {
+		log.Fatalf("error initializing notification email queue: %v", err)
+	}
+	return q
+}
+
+func initPushNotification(db *sqlx.DB, settings *setting.Manager, i18n *i18n.I18n) *notifier.PushManager {
+	m, err := notifier.NewPushManager(notifier.PushManagerOpts{
+		DB:          db,
+		Settings:    settings,
+		Lo:          initLogger("push-notification"),
+		I18n:        i18n,
+		RootURL:     ko.String("app.root_url"),
+		Concurrency: ko.MustInt("notification.concurrency"),
+		QueueSize:   ko.MustInt("notification.queue_size"),
+	})
+	if err != nil {
+		log.Fatalf("error initializing push notification manager: %v", err)
+	}
+	return m
+}
+
 // initNotifDispatcher initializes the notification dispatcher.
-func initNotifDispatcher(userNotification *notifier.UserNotificationManager, outbound *notifier.Service, wsHub *ws.Hub, emailEnabled bool) *notifier.Dispatcher {
+func initNotifDispatcher(userNotification *notifier.UserNotificationManager, prefs *notifier.PreferenceManager, push *notifier.PushManager, emailQueue *notifier.EmailQueue, wsHub *ws.Hub, emailEnabled bool) *notifier.Dispatcher {
+	providers := []notificationchannels.Provider{
+		notificationchannels.NewInApp(userNotification, wsHub, initLogger("notification-in-app")),
+	}
+	if emailEnabled {
+		providers = append(providers, notificationchannels.NewEmail(emailQueue))
+	}
+	providers = append(providers, notificationchannels.NewPush(push))
 	return notifier.NewDispatcher(notifier.DispatcherOpts{
-		InApp:        userNotification,
-		Outbound:     outbound,
-		WSHub:        wsHub,
-		EmailEnabled: emailEnabled,
-		Lo:           initLogger("notification-dispatcher"),
+		Pipeline: notificationchannels.NewPipeline(providers...),
+		Prefs:    prefs,
 	})
 }
 

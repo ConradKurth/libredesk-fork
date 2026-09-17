@@ -4,6 +4,22 @@ FROM users
 -- email != 'System' also drops NULL-email users (anonymous visitors); AI assistants have no email and must still be listed.
 WHERE (users.email != 'System' OR users.type = 'ai_assistant') AND users.deleted_at IS NULL AND type = ANY($1)
 
+-- name: get-agents-compact
+SELECT users.id, users.avatar_url, users.type, users.created_at, users.updated_at, users.first_name, users.last_name, users.email, users.enabled, users.external_user_id, users.availability_status
+FROM users
+WHERE (users.email != 'System' OR users.type = 'ai_assistant') AND users.deleted_at IS NULL AND users.type = ANY($1)
+    AND ($2 = '' OR CONCAT(users.first_name, ' ', COALESCE(users.last_name, '')) ILIKE $7 ESCAPE '\' OR users.email ILIKE $7 ESCAPE '\')
+    AND ($3 = '' OR users.type::text = $3)
+    AND (NOT $4 OR users.enabled)
+ORDER BY users.first_name, users.last_name, users.id
+LIMIT NULLIF($5, 0) OFFSET $6;
+
+-- name: get-agents-compact-by-ids
+SELECT users.id, users.avatar_url, users.type, users.created_at, users.updated_at, users.first_name, users.last_name, users.email, users.enabled, users.external_user_id, users.availability_status
+FROM users
+WHERE (users.email != 'System' OR users.type = 'ai_assistant') AND users.deleted_at IS NULL AND users.type = ANY($1) AND users.id = ANY($2)
+ORDER BY users.first_name, users.last_name, users.id;
+
 -- name: soft-delete-agent
 WITH soft_delete AS (
     UPDATE users
@@ -228,6 +244,11 @@ WHERE id = $1;
 UPDATE users
 SET enabled = $3, updated_at = NOW()
 WHERE id = $1 AND type = $2;
+
+-- name: insert-contact
+INSERT INTO users (email, type, first_name, last_name, "password", phone_number, phone_number_country_code, country)
+VALUES ($1, 'contact', $2, $3, $4, $5, $6, $7)
+RETURNING id;
 
 -- name: update-contact
 UPDATE users
