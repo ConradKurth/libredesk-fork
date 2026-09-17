@@ -236,7 +236,55 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 		if message.ShouldEvaluateAutomation(systemUser.ID) {
 			m.automation.EvaluateConversationUpdateRulesByID(message.ConversationID, "", amodels.EventConversationMessageOutgoing, umodels.User{ID: message.SenderID})
 		}
+
+		// A human agent's public reply hands the conversation off from the AI
+		// assistant that owns it, so the assistant stops auto-replying to the
+		// customer's later messages.
+		m.maybeHandOffFromAssistant(message, conversation)
 	}
+}
+
+// maybeHandOffFromAssistant reassigns a conversation from its AI assistant to a
+// human agent when that agent posts a public reply, so the assistant no longer
+// auto-responds to the customer's subsequent messages. It is a no-op unless the
+// conversation is currently owned by an assistant and the sender is a human agent
+// other than that assistant. Automated replies (message meta is_automated, e.g. the
+// desk sidecar's order-status auto-send) are exempt, since they are not a human
+// takeover.
+func (m *Manager) maybeHandOffFromAssistant(message models.Message, conversation models.Conversation) {
+	if m.aiAgent == nil {
+		return
+	}
+	if !assistantHandOffApplies(message, conversation, m.aiAgent.IsAssistantUser) {
+		return
+	}
+	// The sender must be a real agent (not a contact/visitor); the lookup errors otherwise.
+	agent, err := m.userStore.GetAgentCachedOrLoad(message.SenderID)
+	if err != nil {
+		return
+	}
+	if err := m.UpdateConversationUserAssignee(conversation.UUID, message.SenderID, agent); err != nil {
+		m.lo.Error("error handing conversation off from AI assistant to human agent",
+			"conversation_uuid", conversation.UUID, "user_id", message.SenderID, "error", err)
+	}
+}
+
+// assistantHandOffApplies reports whether a public outgoing message from
+// message.SenderID should hand the conversation off from its AI assistant: the
+// conversation is currently owned by an assistant, and the sender is a human agent
+// (neither that assistant nor an automated/integration send). isAssistant reports
+// whether a user id is an AI assistant's identity user.
+func assistantHandOffApplies(message models.Message, conversation models.Conversation, isAssistant func(int) bool) bool {
+	if message.Private || message.IsAutomated() {
+		return false
+	}
+	if !conversation.AssignedUserID.Valid || !isAssistant(conversation.AssignedUserID.Int) {
+		return false
+	}
+	if isAssistant(message.SenderID) {
+		return false
+	}
+	return true
 }
 
 // BuildTemplateData builds the common template data map for rendering message content variables.

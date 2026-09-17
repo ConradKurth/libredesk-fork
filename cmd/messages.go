@@ -24,6 +24,10 @@ type messageReq struct {
 	Mentions    []cmodels.MentionInput `json:"mentions"`
 	EchoID      string                 `json:"echo_id"`
 	SourceID    string                 `json:"source_id"` // RFC 5322 Message-ID of the inbound message; stored on the created contact message so replies thread on it. Contact sender only.
+	// IsAutomated marks a reply as machine-generated (e.g. an integration's
+	// auto-send). Such replies do not trigger automation rules and do not hand a
+	// conversation off from its AI assistant. Human agent replies leave this false.
+	IsAutomated bool `json:"is_automated"`
 }
 
 // handleGetMessages returns messages for a conversation.
@@ -272,6 +276,9 @@ func handleSendMessage(r *fastglue.Request) error {
 	meta := map[string]any{}
 	if req.EchoID != "" {
 		meta["echo_id"] = req.EchoID
+	}
+	if req.IsAutomated {
+		meta["is_automated"] = true
 	}
 	message, err := app.conversation.QueueReply(media, conv.InboxID, user.ID, conv.ContactID, cuuid, req.Message, req.To, req.CC, req.BCC, meta)
 	if err != nil {
