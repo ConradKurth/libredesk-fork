@@ -108,7 +108,7 @@
               <div
                 v-else
                 ref="messageContentEl"
-                :class="{ 'email-canvas': isIncomingHtml }"
+                :class="{ 'email-force-light': isIncomingHtml }"
                 @click="onMessageContentClick"
               >
                 <Letter
@@ -128,9 +128,7 @@
                     ? 'bg-gradient-to-t from-private via-private/90 to-transparent'
                     : isOutgoing
                       ? 'bg-gradient-to-t from-secondary via-secondary/90 to-transparent'
-                      : isIncomingHtml
-                        ? 'bg-gradient-to-t from-white via-white/90 to-transparent'
-                        : 'bg-gradient-to-t from-background via-background/90 to-transparent'
+                      : 'bg-gradient-to-t from-background via-background/90 to-transparent'
                 "
               >
                 <button
@@ -362,7 +360,8 @@ const aiAssistantRoute = computed(() => {
 const isOutgoing = computed(() => props.direction === 'outgoing')
 
 // Incoming HTML emails carry sender styles (often inline black text) that assume
-// a white page; render them on a white canvas so they stay readable in dark mode.
+// a white page; in dark mode we force their text light so they stay readable
+// (see the `.email-force-light` rule).
 const isIncomingHtml = computed(
   () => !isOutgoing.value && props.message.content_type !== 'text'
 )
@@ -485,18 +484,23 @@ const showEnvelope = computed(() => {
   cursor: zoom-in;
 }
 
-// Incoming email bodies render on a fixed white canvas (theme-independent) so
-// sender HTML that assumes a white page — e.g. Outlook forwards with inline
-// black text — stays readable in dark mode. Sender inline colors still win;
-// this only sets the fallbacks for otherwise-uncolored text and links.
-.email-canvas {
-  background: #ffffff;
-  color: #1a1a1a;
-  border-radius: 0.5rem;
-  padding: 0.75rem 1rem;
+// Incoming HTML emails often carry inline black text that assumes a white page.
+// In dark mode that renders black-on-dark and is unreadable, so force the body
+// text + links to the theme foreground/primary. Scoped to `.dark` so light mode
+// leaves sender styling untouched. Trade-off: this also overrides sender text
+// colors (flattening brand colors), and an email that sets its own light section
+// background can end up light-on-light.
+:global(.dark) .email-force-light {
+  color: hsl(var(--foreground)) !important;
 
-  :deep(a) {
-    color: #0b57d0;
+  :deep(*) {
+    color: hsl(var(--foreground)) !important;
+    border-color: hsl(var(--border)) !important;
+  }
+
+  :deep(a),
+  :deep(a *) {
+    color: hsl(var(--primary)) !important;
   }
 }
 </style>
