@@ -234,3 +234,42 @@ func TestNormalizeOTPEmail(t *testing.T) {
 		}
 	}
 }
+
+func TestClaimsCodeSent(t *testing.T) {
+	// Real phantom-send replies from prod: each told the customer a code went out with no send call.
+	claims := []string{
+		"I’m happy to help with that! To get started, I’ll need to verify your account. I’ve just sent a verification code to **jane.doe@gmail.com**—please reply with the code when you receive it.",
+		"Sure thing—please reply with the verification code from the email I just sent.",
+		"I’m happy to help you cancel your subscription. I’ll first send a verification code to your email address jane@gmail.com. Please reply with the code.",
+		"It looks like that code didn’t work. I’ll send a new verification email—please check your inbox and reply with the fresh code.",
+	}
+	for _, reply := range claims {
+		if !claimsCodeSent(reply) {
+			t.Errorf("claimsCodeSent(%q) = false, want true", reply)
+		}
+	}
+
+	notClaims := []string{
+		"I’ll need to verify your account before we can look at a refund. Could you please confirm the email address you’d like the verification code sent to?",
+		"Would you like me to send a verification code to jane@gmail.com?",
+		"You can change your flavor any time at cyclonepods.com/account/subscriptions.",
+		"Your order shipped yesterday and the tracking code is on its way.",
+	}
+	for _, reply := range notClaims {
+		if claimsCodeSent(reply) {
+			t.Errorf("claimsCodeSent(%q) = true, want false", reply)
+		}
+	}
+}
+
+func TestMentionsOtherEmail(t *testing.T) {
+	if mentionsOtherEmail("I’ve sent a code to **Jane@Gmail.com**.", "jane@gmail.com") {
+		t.Error("the contact's own address (any case) is not another email")
+	}
+	if !mentionsOtherEmail("I’ve sent a code to other@gmail.com.", "jane@gmail.com") {
+		t.Error("a different address must be flagged")
+	}
+	if mentionsOtherEmail("I’ve sent a code to your email.", "jane@gmail.com") {
+		t.Error("no address named means nothing to flag")
+	}
+}

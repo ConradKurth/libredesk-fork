@@ -66,6 +66,7 @@ var (
 type runOutcome struct {
 	handedOff bool
 	resolved  bool
+	codeSent  bool
 }
 
 type searchKnowledgeTool struct {
@@ -219,8 +220,9 @@ func (t *previousConversationsTool) Execute(ctx context.Context, args string) (s
 // sendEmailVerificationTool emails a one-time code to the contact's on-file email. The code is sent
 // out of band via the notification transport, never posted into the conversation transcript.
 type sendEmailVerificationTool struct {
-	m    *Manager
-	conv *cmodels.Conversation
+	m       *Manager
+	conv    *cmodels.Conversation
+	outcome *runOutcome
 }
 
 func (t *sendEmailVerificationTool) Name() string { return "send_email_verification" }
@@ -232,63 +234,74 @@ func (t *sendEmailVerificationTool) Description() string {
 func (t *sendEmailVerificationTool) Parameters() types.JSONText { return emptyParams }
 
 func (t *sendEmailVerificationTool) Execute(ctx context.Context, args string) (string, error) {
-	email := strings.TrimSpace(t.conv.Contact.Email.String)
-	if email == "" {
-		return "The customer has no email yet. Ask them for their email and call set_contact_email first.", nil
+	result, sent, err := t.m.sendVerificationCode(t.conv)
+	if sent {
+		t.outcome.codeSent = true
 	}
-	capReached, err := t.m.otpSendCapReached(t.conv.UUID, email)
+	return result, err
+}
+
+// sendVerificationCode emails a fresh one-time code to the contact's current email, subject to the
+// per-conversation resend cap. sent reports whether an email actually went out; result is the
+// model-facing outcome text.
+func (m *Manager) sendVerificationCode(conv *cmodels.Conversation) (result string, sent bool, err error) {
+	email := strings.TrimSpace(conv.Contact.Email.String)
+	if email == "" {
+		return "The customer has no email yet. Ask them for their email and call set_contact_email first.", false, nil
+	}
+	capReached, err := m.otpSendCapReached(conv.UUID, email)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if capReached {
-		t.m.lo.Debug("ai agent verification resend cap reached", "conversation_uuid", t.conv.UUID)
-		return "The verification code has already been sent several times. Ask the customer to check their inbox and spam folder, or hand off to a human if they cannot find it.", nil
+		m.lo.Debug("ai agent verification resend cap reached", "conversation_uuid", conv.UUID)
+		return "The verification code has already been sent several times. Ask the customer to check their inbox and spam folder, or hand off to a human if they cannot find it.", false, nil
 	}
 	code, err := generateOTP()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if err := t.m.storePendingOTP(t.conv.UUID, code, email); err != nil {
-		return "", err
+	if err := m.storePendingOTP(conv.UUID, code, email); err != nil {
+		return "", false, err
 	}
-	body := t.m.i18n.Ts("ai.agent.verificationEmailBody", "code", code)
+	body := m.i18n.Ts("ai.agent.verificationEmailBody", "code", code)
 	// Livechat inboxes can't send email, so those fall back to the notification email channel.
 	var sendErr error
-	if t.conv.InboxChannel == channelEmail {
+	if conv.InboxChannel == channelEmail {
 		// Reuse the conversation's subject so the code threads into the same email thread instead of
 		// landing in a separate one the customer might reply to.
-		subject := t.conv.Subject.String
+		subject := conv.Subject.String
 		if subject == "" {
-			subject = t.m.i18n.T("ai.agent.verificationEmailSubject")
+			subject = m.i18n.T("ai.agent.verificationEmailSubject")
 		}
-		sendErr = t.m.convo.SendTransientEmail(t.conv.InboxID, t.conv.ID, t.conv.UUID, []string{email}, subject, body)
+		sendErr = m.convo.SendTransientEmail(conv.InboxID, conv.ID, conv.UUID, []string{email}, subject, body)
 	} else {
 		msg := notifier.Message{
 			RecipientEmails: []string{email},
-			Subject:         t.m.i18n.T("ai.agent.verificationEmailSubject"),
+			Subject:         m.i18n.T("ai.agent.verificationEmailSubject"),
 			Content:         body,
 			Provider:        notifier.ProviderEmail,
 		}
 		// Livechat verification happens in chat, not email. Point replies at a no-reply address so a
 		// stray email reply can't be ingested as a new conversation when the notification sender
 		// doubles as a polled inbox.
-		if noReply := t.m.noReplyAddress(); noReply != "" {
+		if noReply := m.noReplyAddress(); noReply != "" {
 			msg.Headers = map[string][]string{"Reply-To": {noReply}}
 		} else {
-			t.m.lo.Warn("no-reply address unavailable, sending verification email without reply-to guard; check notification.email.email_address setting", "conversation_uuid", t.conv.UUID)
+			m.lo.Warn("no-reply address unavailable, sending verification email without reply-to guard; check notification.email.email_address setting", "conversation_uuid", conv.UUID)
 		}
 		// SendSync, not Send: a queued send returns nil even when SMTP later fails.
-		sendErr = t.m.notifier.SendSync(msg)
+		sendErr = m.notifier.SendSync(msg)
 	}
 	if sendErr != nil {
-		t.m.lo.Error("error sending verification code email", "conversation_uuid", t.conv.UUID, "error", sendErr)
-		return "", sendErr
+		m.lo.Error("error sending verification code email", "conversation_uuid", conv.UUID, "error", sendErr)
+		return "", false, sendErr
 	}
-	if err := t.m.incrOTPSends(t.conv.UUID, email); err != nil {
-		t.m.lo.Error("error recording verification send count", "conversation_uuid", t.conv.UUID, "error", err)
+	if err := m.incrOTPSends(conv.UUID, email); err != nil {
+		m.lo.Error("error recording verification send count", "conversation_uuid", conv.UUID, "error", err)
 	}
-	t.m.lo.Debug("ai agent sent verification code", "conversation_uuid", t.conv.UUID, "email", email)
-	return fmt.Sprintf("A verification code has been emailed to %s. Tell them you have sent a code to that address, quoting it exactly, and ask them to reply with the code, checking their spam folder if it is not in the inbox.", email), nil
+	m.lo.Debug("ai agent sent verification code", "conversation_uuid", conv.UUID, "email", email)
+	return fmt.Sprintf("A verification code has been emailed to %s. Tell them you have sent a code to that address, quoting it exactly, and ask them to reply with the code, checking their spam folder if it is not in the inbox.", email), true, nil
 }
 
 // checkEmailVerificationTool verifies the code the customer entered against the pending one.
