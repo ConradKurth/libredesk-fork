@@ -28,6 +28,11 @@ SELECT id, created_at, updated_at, "uuid", store, filename, content_type, conten
 FROM media
 WHERE uuid = $1;
 
+-- name: merge-media-meta
+UPDATE media
+SET meta = meta || $2::jsonb, updated_at = NOW()
+WHERE uuid = $1;
+
 -- name: delete-media
 DELETE FROM media
 WHERE uuid = $1;

@@ -115,6 +115,17 @@
                 />
               </FormItem>
             </FormField>
+
+            <FormField v-slot="{ componentField }" name="vision_model">
+              <FormItem class="md:col-span-2">
+                <FormLabel>{{ t('admin.ai.visionModel') }}</FormLabel>
+                <FormControl>
+                  <Input type="text" placeholder="google/gemini-2.5-flash" v-bind="componentField" />
+                </FormControl>
+                <FormDescription>{{ t('admin.ai.visionModelHint') }}</FormDescription>
+                <FormMessage />
+              </FormItem>
+            </FormField>
           </template>
 
           <template v-if="showEmbeddingFields">
@@ -303,7 +314,8 @@ const form = useForm({
       dimensions: numberField().refine((v) => isBlank(v) || isPositiveInt(v), {
         message: t('admin.ai.positiveNumber')
       }),
-      vision: z.boolean().optional()
+      vision: z.boolean().optional(),
+      vision_model: z.string().optional()
     })
   ),
   initialValues: {
@@ -315,7 +327,8 @@ const form = useForm({
     temperature: fieldDefaults.temperature,
     max_tokens: fieldDefaults.maxTokens,
     dimensions: fieldDefaults.dimensions,
-    vision: false
+    vision: false,
+    vision_model: ''
   }
 })
 
@@ -338,7 +351,8 @@ onMounted(async () => {
         temperature: data.temperature != null ? String(data.temperature) : seed.temperature,
         max_tokens: data.max_tokens ? String(data.max_tokens) : seed.maxTokens,
         dimensions: data.dimensions ? String(data.dimensions) : seed.dimensions,
-        vision: !!data.vision
+        vision: !!data.vision,
+        vision_model: data.vision_model || ''
       },
       false
     )
@@ -359,6 +373,7 @@ const buildPayload = (values) => {
   if (props.showCompletionFields) {
     payload.instructions = values.instructions || ''
     payload.vision = !!values.vision
+    payload.vision_model = (values.vision_model || '').trim()
     payload.reasoning_effort = (values.reasoning_effort || '').trim()
     if (values.temperature !== '' && values.temperature != null)
       payload.temperature = Number(values.temperature)

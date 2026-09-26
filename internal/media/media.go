@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -96,6 +97,7 @@ type queries struct {
 	Get                         *sqlx.Stmt `query:"get-media"`
 	GetByUUID                   *sqlx.Stmt `query:"get-media-by-uuid"`
 	Delete                      *sqlx.Stmt `query:"delete-media"`
+	MergeMeta                   *sqlx.Stmt `query:"merge-media-meta"`
 	LinkMessageMedia            *sqlx.Stmt `query:"link-message-media"`
 	GetByModel                  *sqlx.Stmt `query:"get-model-media"`
 	GetUnlinkedMessageMedia     *sqlx.Stmt `query:"get-unlinked-message-media"`
@@ -187,6 +189,18 @@ func (m *Manager) Get(id int, uuid string) (models.Media, error) {
 		media.URL = m.PublicURL(media.UUID)
 	}
 	return media, nil
+}
+
+// MergeMeta merges the JSON object meta into a media file's meta, overwriting keys it shares.
+func (m *Manager) MergeMeta(uuid string, meta any) error {
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshaling media meta: %w", err)
+	}
+	if _, err := m.queries.MergeMeta.Exec(uuid, b); err != nil {
+		return fmt.Errorf("merging media meta: %w", err)
+	}
+	return nil
 }
 
 // PublicURL returns the stable unsigned app URL for a public media file.
