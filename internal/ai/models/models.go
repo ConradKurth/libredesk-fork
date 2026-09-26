@@ -63,6 +63,9 @@ type ProviderConfig struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 	// Vision marks the completion model as accepting image input; when false the harness drops image parts.
 	Vision bool `json:"vision"`
+	// VisionModel, when set and Vision is false, names a second image-capable model on the same
+	// endpoint that transcribes customer images into text for the completion model.
+	VisionModel string `json:"vision_model,omitempty"`
 }
 
 // Prompt backs the agent-facing rephrase/summarize actions in the reply box.
