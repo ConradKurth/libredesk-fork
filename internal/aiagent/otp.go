@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -184,4 +185,40 @@ func otpCount(v any) int64 {
 		return 0
 	}
 	return n
+}
+
+var (
+	// sentenceRe splits a reply into sentences, keeping each terminator so questions can be told
+	// apart. A period only ends a sentence before whitespace, so "jane@gmail.com?" stays whole.
+	sentenceRe = regexp.MustCompile(`(?:[^.?!\n]|\.\S)+(?:[.?!]|\n|$)`)
+	// "I've sent a verification code", "I'll send a new verification email".
+	sendThenCodeRe = regexp.MustCompile(`(?i)\b(?:sent|send|sending|emailed|emailing)\b[^.?!]{0,40}\b(?:code|verification)\b`)
+	// "reply with the code from the email I just sent".
+	codeThenSentRe = regexp.MustCompile(`(?i)\b(?:code|email)\b[^.?!]{0,40}\bI(?:['’]ve| have)?(?: just| already)? (?:sent|emailed)\b`)
+	emailAddrRe    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+)
+
+// claimsCodeSent reports whether a reply tells the customer a verification code was (or is being)
+// emailed. Questions are skipped: "which email should I send the code to?" asks, it doesn't claim.
+func claimsCodeSent(reply string) bool {
+	for _, sentence := range sentenceRe.FindAllString(reply, -1) {
+		if strings.HasSuffix(strings.TrimSpace(sentence), "?") {
+			continue
+		}
+		if sendThenCodeRe.MatchString(sentence) || codeThenSentRe.MatchString(sentence) {
+			return true
+		}
+	}
+	return false
+}
+
+// mentionsOtherEmail reports whether a reply names an email address other than the contact's, which
+// means a claimed code would have gone somewhere we don't have on file.
+func mentionsOtherEmail(reply, contactEmail string) bool {
+	for _, addr := range emailAddrRe.FindAllString(reply, -1) {
+		if !strings.EqualFold(addr, strings.TrimSpace(contactEmail)) {
+			return true
+		}
+	}
+	return false
 }

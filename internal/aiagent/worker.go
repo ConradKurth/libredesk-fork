@@ -304,9 +304,10 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	// them. set_contact_email is visitor-only, so a self-claimed email can be corrected in chat; a
 	// known contact's email is never swappable this way.
 	needsVerification := m.assistantHasVerifiedTool(assistant)
-	if needsVerification && (conv.InboxChannel == channelEmail || conv.Contact.Type != umodels.UserTypeContact) {
+	offerVerification := needsVerification && (conv.InboxChannel == channelEmail || conv.Contact.Type != umodels.UserTypeContact)
+	if offerVerification {
 		offerSetEmail := conv.Contact.Type == umodels.UserTypeVisitor
-		tools = append(tools, &sendEmailVerificationTool{m: m, conv: &conv})
+		tools = append(tools, &sendEmailVerificationTool{m: m, conv: &conv, outcome: outcome})
 		tools = append(tools, &checkEmailVerificationTool{m: m, conv: &conv})
 		if offerSetEmail {
 			tools = append(tools, &setContactEmailTool{m: m, conv: &conv})
@@ -354,6 +355,15 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	if outcome.handedOff {
 		m.lo.Debug("ai agent handed off", "conversation_uuid", conv.UUID)
 		return
+	}
+	// The model sometimes tells the customer it emailed a code without calling send_email_verification,
+	// leaving them waiting on an email that never comes. Make the claim true, or hand off if we can't.
+	if offerVerification && !outcome.codeSent && !verified() && claimsCodeSent(answer) {
+		m.lo.Warn("ai agent phantom verification send, sending server-side", "conversation_uuid", conv.UUID)
+		if !m.sendClaimedCode(&conv, answer) {
+			m.handoff(conv, assistant, "The assistant told the customer a verification code was emailed, but it could not be sent. Please verify and help the customer directly.")
+			return
+		}
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
 	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
@@ -413,6 +423,18 @@ func (m *Manager) keepTyping(conversationUUID string) func() {
 		close(stop)
 		m.convo.BroadcastTypingToWidgetClientsOnly(conversationUUID, false)
 	}
+}
+
+// sendClaimedCode sends the verification code a reply claimed was sent. It refuses when the reply
+// names an address other than the contact's (the code would go somewhere the customer isn't
+// expecting), and reports false when nothing went out (no email on file, resend cap, send error).
+func (m *Manager) sendClaimedCode(conv *cmodels.Conversation, reply string) bool {
+	if mentionsOtherEmail(reply, conv.Contact.Email.String) {
+		m.lo.Warn("ai agent claimed code sent to an address not on file", "conversation_uuid", conv.UUID)
+		return false
+	}
+	_, sent, err := m.sendVerificationCode(conv)
+	return err == nil && sent
 }
 
 func (m *Manager) postReply(conv cmodels.Conversation, assistant models.Assistant, text string, meta map[string]any) error {
