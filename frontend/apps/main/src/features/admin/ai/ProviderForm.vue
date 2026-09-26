@@ -120,7 +120,7 @@
               <FormItem class="md:col-span-2">
                 <FormLabel>{{ t('admin.ai.visionModel') }}</FormLabel>
                 <FormControl>
-                  <Input type="text" placeholder="google/gemini-2.5-flash" v-bind="componentField" />
+                  <Input type="text" placeholder="google/gemini-3.8-flash" v-bind="componentField" />
                 </FormControl>
                 <FormDescription>{{ t('admin.ai.visionModelHint') }}</FormDescription>
                 <FormMessage />
