@@ -37,6 +37,7 @@ type Assistant struct {
 	MaxTurns       int            `db:"max_turns" json:"max_turns"`
 	FallbackTeamID null.Int       `db:"fallback_team_id" json:"fallback_team_id"`
 	HandoffEnabled bool           `db:"handoff_enabled" json:"handoff_enabled"`
+	HandoffMessage string         `db:"handoff_message" json:"handoff_message"`
 	Languages      pq.StringArray `db:"languages" json:"languages"`
 	Enabled        bool           `db:"enabled" json:"enabled"`
 	ToolIDs        []int          `db:"-" json:"tool_ids"`
