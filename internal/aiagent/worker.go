@@ -245,7 +245,8 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	// only act on a turn the primary contact authored - otherwise a participant's message could drive
 	// tool actions under the contact's identity. Anyone else gets a human.
 	if inbound.SenderID != conv.ContactID {
-		m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffOtherParticipant"))
+		// No customer-facing handoff message: it would go to the primary contact, who didn't write this turn.
+		m.transfer(conv, assistant, m.i18n.T("ai.agent.handoffOtherParticipant"))
 		return
 	}
 	// Turn cap is per engagement (since the assistant was last assigned), so a human reassigning a
@@ -454,8 +455,19 @@ func (m *Manager) postReply(conv cmodels.Conversation, assistant models.Assistan
 	return nil
 }
 
-// handoff notes the reason and moves the conversation to the fallback team, or unassigns if none is set.
+// handoff tells the customer a human will follow up (the assistant's handoff message, if set), then transfers.
+// Without it the customer hears nothing: the private note is agent-only and the assistant goes quiet.
 func (m *Manager) handoff(conv cmodels.Conversation, assistant models.Assistant, reason string) {
+	if assistant.HandoffMessage != "" {
+		if err := m.postReply(conv, assistant, assistant.HandoffMessage, nil); err != nil {
+			m.lo.Error("error posting handoff message", "conversation_uuid", conv.UUID, "error", err)
+		}
+	}
+	m.transfer(conv, assistant, reason)
+}
+
+// transfer notes the reason and moves the conversation to the fallback team, or unassigns if none is set.
+func (m *Manager) transfer(conv cmodels.Conversation, assistant models.Assistant, reason string) {
 	actor := m.actorUser(assistant)
 	note := strings.TrimSpace(reason)
 	if note == "" {

@@ -168,6 +168,21 @@
       </FormItem>
     </FormField>
 
+    <FormField v-slot="{ componentField }" name="handoff_message">
+      <FormItem>
+        <FormLabel>{{ t('admin.ai.assistant.handoffMessage') }}</FormLabel>
+        <FormControl>
+          <Textarea
+            rows="3"
+            :placeholder="t('admin.ai.assistant.handoffMessagePlaceholder')"
+            v-bind="componentField"
+          />
+        </FormControl>
+        <FormDescription>{{ t('admin.ai.assistant.handoffMessageHint') }}</FormDescription>
+        <FormMessage />
+      </FormItem>
+    </FormField>
+
     <FormField v-slot="{ componentField }" name="instructions">
       <FormItem>
         <FormLabel>{{ t('admin.ai.assistant.instructions') }}</FormLabel>
@@ -317,6 +332,7 @@ const form = useForm({
         .max(20, { message: t('admin.ai.assistant.maxTurnsHint') }),
       fallback_team_id: z.string().optional(),
       handoff_enabled: z.boolean().optional(),
+      handoff_message: z.string().optional(),
       languages: z.array(z.string()).optional(),
       instructions: z.string().optional(),
       guardrails: z.string().optional(),
@@ -332,6 +348,7 @@ const form = useForm({
     max_turns: 6,
     fallback_team_id: 'none',
     handoff_enabled: true,
+    handoff_message: '',
     languages: [],
     instructions: '',
     guardrails: '',
@@ -360,6 +377,7 @@ watch(
         max_turns: values.max_turns ?? 6,
         fallback_team_id: values.fallback_team_id ? String(values.fallback_team_id) : 'none',
         handoff_enabled: values.handoff_enabled ?? true,
+        handoff_message: values.handoff_message || '',
         languages: [...(values.languages || [])],
         instructions: values.instructions || '',
         guardrails: values.guardrails || '',
@@ -404,6 +422,7 @@ const onSubmit = form.handleSubmit(async (values) => {
           ? Number(values.fallback_team_id)
           : null,
       handoff_enabled: !!values.handoff_enabled,
+      handoff_message: values.handoff_message || '',
       languages: values.languages || [],
       instructions: values.instructions || '',
       guardrails: values.guardrails || '',

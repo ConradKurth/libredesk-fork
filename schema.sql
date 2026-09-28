@@ -794,6 +794,7 @@ CREATE TABLE ai_assistants (
 	max_turns INTEGER NOT NULL DEFAULT 6,
 	fallback_team_id INTEGER NULL REFERENCES teams(id) ON DELETE SET NULL,
 	handoff_enabled BOOLEAN NOT NULL DEFAULT true,
+	handoff_message TEXT NOT NULL DEFAULT '',
 	languages TEXT[] NOT NULL DEFAULT '{}',
 	enabled BOOLEAN NOT NULL DEFAULT true,
 	CONSTRAINT constraint_ai_assistants_on_tone CHECK (tone IN ('friendly', 'professional', 'neutral', 'casual')),
