@@ -65,8 +65,10 @@ var (
 // runOutcome records which terminal tool action the assistant took during one response run.
 type runOutcome struct {
 	handedOff bool
-	resolved  bool
-	codeSent  bool
+	// handoffReason is the model's note for the human; the handoff itself runs after the reply is posted.
+	handoffReason string
+	resolved      bool
+	codeSent      bool
 }
 
 type searchKnowledgeTool struct {
@@ -144,9 +146,11 @@ func (t *handoffTool) Execute(ctx context.Context, args string) (string, error) 
 	}
 	_ = json.Unmarshal([]byte(args), &in)
 	t.m.lo.Debug("ai agent handoff tool called", "conversation_uuid", t.conv.UUID, "reason", in.Reason)
-	t.m.handoff(t.conv, t.assistant, in.Reason)
+	// Only record it: the worker posts this run's answer first, then hands off, so the customer gets
+	// the knowledge-base answer and not just the handoff message.
 	t.outcome.handedOff = true
-	return "The conversation has been handed off to a human. Do not take further action.", nil
+	t.outcome.handoffReason = in.Reason
+	return "Handoff recorded: a human will take over after your reply. Now write your reply to the customer, including any answer or steps from the knowledge base. Don't call any more tools. A note that our team will follow up is added automatically.", nil
 }
 
 type resolveTool struct {
