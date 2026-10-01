@@ -348,14 +348,23 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	}
 	if err != nil {
 		m.lo.Error("error running ai agent", "conversation_uuid", conv.UUID, "error", err)
-		if !outcome.handedOff {
-			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
+		reason := m.i18n.T("ai.agent.handoffError")
+		if outcome.handedOff {
+			reason = outcome.handoffReason
 		}
+		m.handoff(conv, assistant, reason)
 		return
 	}
-	// The assistant escalated; the handoff tool already reassigned and noted it.
+	// The assistant escalated: post its answer (the knowledge-base part it could give), then hand off.
 	if outcome.handedOff {
-		m.lo.Debug("ai agent handed off", "conversation_uuid", conv.UUID)
+		// A "did that resolve it?" question makes no sense once a human is taking over.
+		reply, _ := splitConfirmation(strings.TrimSpace(answer))
+		// The human takes over verification; don't leave the customer waiting on a code that was never sent.
+		if !outcome.codeSent && claimsCodeSent(reply) {
+			reply = ""
+		}
+		m.lo.Debug("ai agent handing off", "conversation_uuid", conv.UUID, "reply_len", len(reply))
+		m.handoffWithReply(conv, assistant, reply, outcome.handoffReason)
 		return
 	}
 	// The model sometimes tells the customer it emailed a code without calling send_email_verification,
@@ -458,12 +467,28 @@ func (m *Manager) postReply(conv cmodels.Conversation, assistant models.Assistan
 // handoff tells the customer a human will follow up (the assistant's handoff message, if set), then transfers.
 // Without it the customer hears nothing: the private note is agent-only and the assistant goes quiet.
 func (m *Manager) handoff(conv cmodels.Conversation, assistant models.Assistant, reason string) {
-	if assistant.HandoffMessage != "" {
-		if err := m.postReply(conv, assistant, assistant.HandoffMessage, nil); err != nil {
+	m.handoffWithReply(conv, assistant, "", reason)
+}
+
+// handoffWithReply posts the assistant's reply and the handoff message as one message (one email), then transfers.
+func (m *Manager) handoffWithReply(conv cmodels.Conversation, assistant models.Assistant, reply, reason string) {
+	if text := joinNonEmpty(reply, assistant.HandoffMessage); text != "" {
+		if err := m.postReply(conv, assistant, text, nil); err != nil {
 			m.lo.Error("error posting handoff message", "conversation_uuid", conv.UUID, "error", err)
 		}
 	}
 	m.transfer(conv, assistant, reason)
+}
+
+// joinNonEmpty joins the non-blank parts as separate paragraphs.
+func joinNonEmpty(parts ...string) string {
+	var out []string
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, "\n\n")
 }
 
 // transfer notes the reason and moves the conversation to the fallback team, or unassigns if none is set.
