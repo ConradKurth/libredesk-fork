@@ -27,6 +27,11 @@ const (
 	maxToolResultChars = 64 << 10
 
 	maxToolNameLen = 64
+
+	// handoffHeader is set by a custom tool's response to hand the conversation to a human after
+	// the assistant replies; its value is the reason noted for the team. A response header, not the
+	// body, so nothing the model reads or writes can trigger it.
+	handoffHeader = "X-Libredesk-Handoff"
 )
 
 var (
@@ -134,6 +139,10 @@ type ToolContext struct {
 	// Verified is evaluated live per tool call (never snapshotted) so a contact who verifies
 	// mid-turn passes on the same turn. A nil func is treated as unverified (fail closed).
 	Verified func() bool
+	// OnHandoff, when set, is called when a custom tool answers with the handoffHeader: the tool
+	// queued work for a human (a replacement to approve, a return label to buy), so the assistant
+	// should hand the conversation off once its reply is posted.
+	OnHandoff func(reason string)
 }
 
 func (c ToolContext) verified() bool { return c.Verified != nil && c.Verified() }
@@ -275,6 +284,9 @@ func (t *httpTool) Execute(ctx context.Context, args string) (string, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Sprintf("tool returned status %d: %s", resp.StatusCode, body), nil
+	}
+	if reason := strings.TrimSpace(resp.Header.Get(handoffHeader)); reason != "" && t.tctx.OnHandoff != nil {
+		t.tctx.OnHandoff(reason)
 	}
 	return body, nil
 }

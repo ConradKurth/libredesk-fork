@@ -328,6 +328,15 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		InboxID:           conv.InboxID,
 		ContactEmail:      func() string { return conv.Contact.Email.String },
 		Verified:          verified,
+		// A tool that queued work for a human (e.g. a replacement to approve) hands off after the
+		// reply. The tool must not reassign the conversation itself: that mid-run change drops the
+		// reply below as a human takeover.
+		OnHandoff: func(reason string) {
+			outcome.handedOff = true
+			if outcome.handoffReason == "" {
+				outcome.handoffReason = reason
+			}
+		},
 	}
 	timeout := emailRunTimeout
 	if conv.InboxChannel != channelEmail {
@@ -375,6 +384,15 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 			m.handoff(conv, assistant, "The assistant told the customer a verification code was emailed, but it could not be sent. Please verify and help the customer directly.")
 			return
 		}
+	}
+	// The model sometimes tells the customer a teammate will act (process a replacement, follow up)
+	// without handing off, so the ticket stays with the assistant (or gets resolved) and no human
+	// ever sees it. Make the promise true: post the reply and hand off.
+	if claimsTeammateAction(answer) {
+		m.lo.Warn("ai agent promised teammate action without handoff, handing off", "conversation_uuid", conv.UUID)
+		reply, _ := splitConfirmation(strings.TrimSpace(answer))
+		m.handoffWithReply(conv, assistant, reply, "The assistant told the customer a teammate will follow up. Please pick this up.")
+		return
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
 	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
