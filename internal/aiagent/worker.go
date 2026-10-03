@@ -17,6 +17,8 @@ import (
 	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
 	statusmodels "github.com/abhinavxd/libredesk/internal/conversation/status/models"
 	imageutil "github.com/abhinavxd/libredesk/internal/image"
+	"github.com/abhinavxd/libredesk/internal/inbox"
+	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
 
 	"github.com/abhinavxd/libredesk/internal/stringutil"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
@@ -31,7 +33,8 @@ const (
 
 	// confirmMarker is the line the model emits before its trailing confirmation question so it
 	// can be split off and sent as a separate message.
-	confirmMarker = "[[confirm]]"
+	confirmMarker     = "[[confirm]]"
+	suggestionsMarker = "[[suggestions]]"
 
 	// typingRefreshInterval must stay under the widget's 5s typing expiry (TYPING_RECEIVE_TIMEOUT).
 	typingRefreshInterval = 3 * time.Second
@@ -275,14 +278,8 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	}
 	m.lo.Debug("ai agent running", "conversation_uuid", conv.UUID, "history_messages", len(history), "turns", turns)
 
-	// A JWT livechat contact is trusted by login; everyone else (email channel, anonymous visitor)
-	// is trusted only within an OTP verification window. Read live so mid-turn verification counts.
-	verified := func() bool {
-		if conv.InboxChannel != channelEmail && conv.Contact.Type == umodels.UserTypeContact {
-			return true
-		}
-		return m.isConversationVerified(conv.UUID, conv.Contact.Email.String)
-	}
+	// Read live so mid-turn verification counts.
+	verified := func() bool { return m.isContactVerified(conv) }
 	// Snapshot for the run-start registration decisions (one Redis read); tctx still gets the live
 	// closure so mid-turn verification is picked up per tool call.
 	runVerified := verified()
@@ -368,11 +365,23 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	if outcome.handedOff {
 		// A "did that resolve it?" question makes no sense once a human is taking over.
 		reply, _ := splitConfirmation(strings.TrimSpace(answer))
+		reply, _ = splitSuggestions(reply)
 		// The human takes over verification; don't leave the customer waiting on a code that was never sent.
 		if !outcome.codeSent && claimsCodeSent(reply) {
 			reply = ""
 		}
 		m.lo.Debug("ai agent handing off", "conversation_uuid", conv.UUID, "reply_len", len(reply))
+		// Live chat posts the reply as its own bubble, then may ask for the customer's details in the
+		// pre-chat form; CompleteHandoff transfers once they submit it.
+		if conv.InboxChannel == inbox.ChannelLiveChat {
+			if reply != "" {
+				_ = m.postReply(conv, assistant, reply, nil)
+				reply = ""
+			}
+			if m.requestHandoffForm(conv, assistant) {
+				return
+			}
+		}
 		m.handoffWithReply(conv, assistant, reply, outcome.handoffReason)
 		return
 	}
@@ -391,24 +400,33 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	if claimsTeammateAction(answer) {
 		m.lo.Warn("ai agent promised teammate action without handoff, handing off", "conversation_uuid", conv.UUID)
 		reply, _ := splitConfirmation(strings.TrimSpace(answer))
+		reply, _ = splitSuggestions(reply)
 		m.handoffWithReply(conv, assistant, reply, "The assistant told the customer a teammate will follow up. Please pick this up.")
 		return
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
 	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
+	answer, answerSuggestions := splitSuggestions(answer)
+	confirm, confirmSuggestions := splitSuggestions(confirm)
 	// Email gets one message; separate chat-style bubbles only suit the widget.
 	if conv.InboxChannel == channelEmail && confirm != "" {
 		answer, confirm = answer+"\n\n"+confirm, ""
+		answerSuggestions, confirmSuggestions = nil, nil
 	}
 	if answer != "" {
 		m.lo.Debug("ai agent replying", "conversation_uuid", conv.UUID, "reply_len", len(answer), "resolved", outcome.resolved)
-		if err := m.postReply(conv, assistant, answer, nil); err != nil {
+		if err := m.postReply(conv, assistant, answer, suggestedRepliesMeta(answerSuggestions)); err != nil {
 			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 			return
 		}
 	}
 	if confirm != "" {
-		if err := m.postReply(conv, assistant, confirm, map[string]any{"is_confirmation": true}); err != nil {
+		if len(confirmSuggestions) == 0 {
+			confirmSuggestions = []string{m.i18n.T("globals.messages.yes"), m.i18n.T("ai.agent.needMoreHelp")}
+		}
+		meta := suggestedRepliesMeta(confirmSuggestions)
+		meta["is_confirmation"] = true
+		if err := m.postReply(conv, assistant, confirm, meta); err != nil {
 			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 			return
 		}
@@ -480,6 +498,59 @@ func (m *Manager) postReply(conv cmodels.Conversation, assistant models.Assistan
 		return err
 	}
 	return nil
+}
+
+func (m *Manager) CompleteHandoff(conv cmodels.Conversation) error {
+	if !conv.AssignedUserID.Valid {
+		return fmt.Errorf("conversation has no assigned assistant")
+	}
+	assistant, err := m.GetAssistantByUserID(int(conv.AssignedUserID.Int))
+	if err != nil {
+		return err
+	}
+	private := false
+	messages, _, err := m.convo.GetConversationMessages(conv.UUID, 1, 1, &private, []string{cmodels.MessageOutgoing})
+	if err != nil {
+		return err
+	}
+	if len(messages) == 0 || !messageMetaBool(messages[0].Meta, "handoff_form_pending") {
+		return fmt.Errorf("conversation has no pending handoff form")
+	}
+	// A refresh re-shows the form from the saved flag, and two submits racing must hand off only once.
+	cleared, err := m.convo.ClearHandoffFormPending(messages[0].UUID)
+	if err != nil {
+		return err
+	}
+	if !cleared {
+		return fmt.Errorf("conversation has no pending handoff form")
+	}
+	m.handoff(conv, assistant, "")
+	return nil
+}
+
+func (m *Manager) requestHandoffForm(conv cmodels.Conversation, assistant models.Assistant) bool {
+	if conv.InboxChannel != inbox.ChannelLiveChat {
+		return false
+	}
+	inboxRecord, err := m.inbox.GetDBRecord(conv.InboxID)
+	if err != nil {
+		m.lo.Error("error loading inbox for AI handoff form", "inbox_id", conv.InboxID, "error", err)
+		return false
+	}
+	var config livechat.Config
+	if err := json.Unmarshal(inboxRecord.Config, &config); err != nil {
+		m.lo.Error("error parsing inbox config for AI handoff form", "inbox_id", conv.InboxID, "error", err)
+		return false
+	}
+	isVisitor := conv.Contact.Type == umodels.UserTypeVisitor
+	config = config.ResolvePreChatForm(isVisitor)
+	if !config.PreChatForm.Enabled || !config.PreChatForm.HandoffOnly || !slices.ContainsFunc(config.PreChatForm.Fields, func(field livechat.PreChatFormField) bool { return field.Enabled }) {
+		return false
+	}
+	if err := m.postReply(conv, assistant, m.i18n.T("ai.agent.handoffFormPrompt"), map[string]any{"handoff_form_pending": true}); err != nil {
+		return false
+	}
+	return true
 }
 
 // handoff tells the customer a human will follow up (the assistant's handoff message, if set), then transfers.
@@ -862,4 +933,45 @@ func splitConfirmation(answer string) (string, string) {
 		return confirm, ""
 	}
 	return main, confirm
+}
+
+func splitSuggestions(answer string) (string, []string) {
+	idx := strings.LastIndex(answer, suggestionsMarker)
+	if idx == -1 {
+		return answer, nil
+	}
+	body := strings.TrimSpace(strings.ReplaceAll(answer[:idx], suggestionsMarker, ""))
+	var raw []string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(answer[idx+len(suggestionsMarker):])), &raw); err != nil {
+		return body, nil
+	}
+	suggestions := make([]string, 0, min(len(raw), 3))
+	for _, suggestion := range raw {
+		suggestion = strings.TrimSpace(suggestion)
+		if suggestion == "" || len([]rune(suggestion)) > 80 || slices.Contains(suggestions, suggestion) {
+			continue
+		}
+		suggestions = append(suggestions, suggestion)
+		if len(suggestions) == 3 {
+			break
+		}
+	}
+	return body, suggestions
+}
+
+func suggestedRepliesMeta(suggestions []string) map[string]any {
+	meta := map[string]any{}
+	if len(suggestions) > 0 {
+		meta["suggested_replies"] = suggestions
+	}
+	return meta
+}
+
+func messageMetaBool(raw json.RawMessage, key string) bool {
+	var meta map[string]any
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return false
+	}
+	value, _ := meta[key].(bool)
+	return value
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/colorlog"
 	"github.com/abhinavxd/libredesk/internal/csat"
 	customAttribute "github.com/abhinavxd/libredesk/internal/custom_attribute"
+	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat/proactive"
 	"github.com/abhinavxd/libredesk/internal/macro"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
 	"github.com/abhinavxd/libredesk/internal/report"
@@ -55,6 +56,8 @@ import (
 	"github.com/abhinavxd/libredesk/internal/template"
 	"github.com/abhinavxd/libredesk/internal/user"
 	"github.com/abhinavxd/libredesk/internal/webhook"
+	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
+	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
 	"github.com/knadh/go-i18n"
 	"github.com/knadh/koanf/v2"
@@ -106,49 +109,56 @@ const (
 
 // App is the global app context which is passed and injected in the http handlers.
 type App struct {
-	ctx              context.Context
-	fs               stuffbin.FileSystem
-	consts           atomic.Value
-	auth             *auth_.Auth
-	authz            *authz.Enforcer
-	i18n             *i18n.I18n
-	lo               *logf.Logger
-	oidc             *oidc.Manager
-	media            *media.Manager
-	setting          *setting.Manager
-	role             *role.Manager
-	user             *user.Manager
-	team             *team.Manager
-	status           *status.Manager
-	priority         *priority.Manager
-	tag              *tag.Manager
-	inbox            *inbox.Manager
-	tmpl             *template.Manager
-	macro            *macro.Manager
-	conversation     *conversation.Manager
-	automation       *automation.Engine
-	businessHours    *businesshours.Manager
-	sla              *sla.Manager
-	csat             *csat.Manager
-	view             *view.Manager
-	ai               *ai.Manager
-	aiAgent          *aiagent.Manager
-	helpcenter       *helpcenter.Manager
-	search           *search.Manager
-	activityLog      *activitylog.Manager
-	notifier         *notifier.Service
-	userNotification *notifier.UserNotificationManager
-	notificationPref *notifier.PreferenceManager
-	pushNotification *notifier.PushManager
-	customAttribute  *customAttribute.Manager
-	report           *report.Manager
-	webhook          *webhook.Manager
-	contextLink      *contextlink.Manager
-	rateLimit        *ratelimit.Limiter
-	redis            *redis.Client
-	fc               *fastcache.FastCache
-	importer         *importer.Importer
-	wsHub            *ws.Hub
+	proactive          *proactive.Manager
+	ctx                context.Context
+	fs                 stuffbin.FileSystem
+	consts             atomic.Value
+	auth               *auth_.Auth
+	authz              *authz.Enforcer
+	i18n               *i18n.I18n
+	lo                 *logf.Logger
+	oidc               *oidc.Manager
+	media              *media.Manager
+	setting            *setting.Manager
+	role               *role.Manager
+	user               *user.Manager
+	team               *team.Manager
+	status             *status.Manager
+	priority           *priority.Manager
+	tag                *tag.Manager
+	inbox              *inbox.Manager
+	tmpl               *template.Manager
+	macro              *macro.Manager
+	conversation       *conversation.Manager
+	automation         *automation.Engine
+	businessHours      *businesshours.Manager
+	sla                *sla.Manager
+	csat               *csat.Manager
+	view               *view.Manager
+	ai                 *ai.Manager
+	aiAgent            *aiagent.Manager
+	helpcenter         *helpcenter.Manager
+	search             *search.Manager
+	activityLog        *activitylog.Manager
+	notifier           *notifier.Service
+	userNotification   *notifier.UserNotificationManager
+	notificationPref   *notifier.PreferenceManager
+	pushNotification   *notifier.PushManager
+	customAttribute    *customAttribute.Manager
+	report             *report.Manager
+	webhook            *webhook.Manager
+	contextLink        *contextlink.Manager
+	rateLimit          *ratelimit.Limiter
+	redis              *redis.Client
+	fc                 *fastcache.FastCache
+	importer           *importer.Importer
+	whatsappTemplate   *whatsappTemplate.Manager
+	whatsappClient     *whatsappapi.Client
+	whatsappIngester   atomic.Pointer[WhatsAppIngester]
+	whatsappIngesterMu sync.Mutex
+	// Inbox IDs whose provider credentials were recently rejected, keyed to the last error time.
+	inboxAuthErrors sync.Map
+	wsHub           *ws.Hub
 
 	// Global state that stores data on an available app update.
 	update *AppUpdate
@@ -271,7 +281,7 @@ func main() {
 		ai                          = initAI(ctx, db, i18n, ssrfControl)
 		sla                         = initSLA(db, team, settings, businessHours, template, user, i18n, notifDispatcher)
 		conversation                = initConversations(i18n, sla, status, priority, wsHub, db, inbox, user, team, media, settings, csat, automation, template, webhook, notifDispatcher)
-		aiAgent                     = initAIAgent(db, i18n, ai, conversation, media, settings, user, notifier, rdb)
+		aiAgent                     = initAIAgent(db, i18n, ai, conversation, inbox, media, settings, user, notifier, rdb)
 		helpCenter                  = initHelpCenter(db, i18n, ai)
 		autoassigner                = initAutoAssigner(team, user, conversation)
 		rateLimiter                 = initRateLimit(rdb)
@@ -289,6 +299,10 @@ func main() {
 	}
 	automation.SetSystemUserID(systemUser.ID)
 	conversation.SetAIAgent(aiAgent)
+
+	waClient := initWhatsAppClient()
+	waTemplates := initWhatsAppTemplates(db, i18n, waClient, inbox)
+	conversation.SetWhatsAppTemplateStore(waTemplates)
 
 	// Worker pools that process work produced on this instance. They run on
 	// every replica: each task is enqueued and consumed within the same process,
@@ -337,16 +351,24 @@ func main() {
 		importer:         initImporter(i18n),
 		webhook:          webhook,
 		contextLink:      initContextLink(db, i18n),
+		proactive:        initProactive(db, i18n),
 		rateLimit:        rateLimiter,
 		redis:            rdb,
 		fc:               initFastCache(rdb),
 		userNotification: userNotification,
+		whatsappClient:   waClient,
+		whatsappTemplate: waTemplates,
 		notificationPref: notificationPreference,
 		pushNotification: pushNotification,
 		wsHub:            wsHub,
 	}
 	app.consts.Store(constants)
 	helpCenterCacheOpts.Logger = log.New(helpCenterCacheLogWriter{lo: app.lo}, "", 0)
+
+	waClient.SetAuthErrorHook(makeWhatsAppAuthErrorHook(app))
+	if err := ensureWhatsAppIngester(app); err != nil {
+		app.lo.Error("error starting whatsapp ingester, inbound whatsapp messages will not be processed", "error", err)
+	}
 
 	g := fastglue.NewGlue()
 	g.SetContext(app)
@@ -383,10 +405,12 @@ func main() {
 	// cluster-wide; when leadership is lost, leaderCtx is cancelled and every job
 	// stops. Handler-fed worker pools (started above) keep running on all replicas.
 	startLeaderJobs := func(leaderCtx context.Context) {
-		startInboxes(leaderCtx, inbox, conversation, user, conversation.SignAvatarURL)
+		startInboxes(leaderCtx, inbox, conversation, user, conversation.SignAvatarURL, waClient, conversation, makeInboxAuthStatusHook(app))
 		go automation.RunTimeTriggers(leaderCtx)
 		go autoassigner.Run(leaderCtx, autoAssignInterval)
+		// The outgoing scanner needs the inboxes registered, else queued messages fail with "inbox not found".
 		go conversation.Run(leaderCtx, messageIncomingQWorkers, messageOutgoingQWorkers, messageOutgoingScanInterval)
+		go whatsappTemplateSyncWorker(leaderCtx, app)
 		go conversation.RunUnsnoozer(leaderCtx, unsnoozeInterval)
 		go conversation.RunContinuity(leaderCtx)
 		go sla.Run(leaderCtx, slaEvaluationInterval)
@@ -434,6 +458,10 @@ func main() {
 		}
 	}
 	cancelShutdown()
+	if ing := app.ingester(); ing != nil {
+		colorlog.Red("Shutting down whatsapp ingester...")
+		ing.Close()
+	}
 	colorlog.Red("Shutting down AI agent...")
 	aiAgent.Close()
 	colorlog.Red("Shutting down AI...")

@@ -26,8 +26,8 @@ SELECT
     assignee.last_name AS "assignee.last_name",
     assignee.avatar_url AS "assignee.avatar_url",
     teams.name AS team_name,
-    cs.name AS status,
-    cp.name AS priority,
+    conversation_statuses.name AS status,
+    conversation_priorities.name AS priority,
     inboxes.name AS inbox_name,
     inboxes.channel AS inbox_channel,
     users.first_name AS "contact.first_name",
@@ -43,8 +43,8 @@ JOIN users ON conversations.contact_id = users.id
 LEFT JOIN users assignee ON conversations.assigned_user_id = assignee.id
 LEFT JOIN teams ON conversations.assigned_team_id = teams.id
 LEFT JOIN inboxes ON conversations.inbox_id = inboxes.id
-LEFT JOIN conversation_statuses cs ON conversations.status_id = cs.id
-LEFT JOIN conversation_priorities cp ON conversations.priority_id = cp.id
+LEFT JOIN conversation_statuses ON conversations.status_id = conversation_statuses.id
+LEFT JOIN conversation_priorities ON conversations.priority_id = conversation_priorities.id
 WHERE conversations.id IN (SELECT id FROM matched_conversations)
   AND $3
   AND (
@@ -81,8 +81,8 @@ SELECT
     assignee.last_name AS "assignee.last_name",
     assignee.avatar_url AS "assignee.avatar_url",
     teams.name AS team_name,
-    cs.name AS conversation_status,
-    cp.name AS priority,
+    conversation_statuses.name AS conversation_status,
+    conversation_priorities.name AS priority,
     inboxes.name AS inbox_name,
     inboxes.channel AS inbox_channel,
     users.first_name AS "contact.first_name",
@@ -96,8 +96,8 @@ LEFT JOIN users sender ON conversation_messages.sender_id = sender.id
 LEFT JOIN users assignee ON conversations.assigned_user_id = assignee.id
 LEFT JOIN teams ON conversations.assigned_team_id = teams.id
 LEFT JOIN inboxes ON conversations.inbox_id = inboxes.id
-LEFT JOIN conversation_statuses cs ON conversations.status_id = cs.id
-LEFT JOIN conversation_priorities cp ON conversations.priority_id = cp.id
+LEFT JOIN conversation_statuses ON conversations.status_id = conversation_statuses.id
+LEFT JOIN conversation_priorities ON conversations.priority_id = conversation_priorities.id
 WHERE conversation_messages.type != 'activity'
   AND conversation_messages.text_content ILIKE $10 ESCAPE '\'
   AND $3
@@ -116,9 +116,11 @@ SELECT
     first_name,
     last_name,
     email,
+    phone_number,
+    phone_number_country_code,
     external_user_id
 FROM users
 WHERE type = 'contact'
 AND deleted_at IS NULL
-AND email ILIKE $1 ESCAPE '\'
+AND (email ILIKE $1 ESCAPE '\' OR phone_number ILIKE $1 ESCAPE '\')
 LIMIT $2;

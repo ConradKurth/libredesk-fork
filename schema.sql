@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
-DROP TYPE IF EXISTS "channels" CASCADE; CREATE TYPE "channels" AS ENUM ('email', 'livechat');
+DROP TYPE IF EXISTS "channels" CASCADE; CREATE TYPE "channels" AS ENUM ('email', 'livechat', 'whatsapp');
 DROP TYPE IF EXISTS "message_type" CASCADE; CREATE TYPE "message_type" AS ENUM ('incoming','outgoing','activity');
 DROP TYPE IF EXISTS "message_sender_type" CASCADE; CREATE TYPE "message_sender_type" AS ENUM ('agent','contact');
 DROP TYPE IF EXISTS "message_status" CASCADE; CREATE TYPE "message_status" AS ENUM ('received','sent','failed','pending');
@@ -118,6 +118,7 @@ CREATE TABLE inboxes (
 	enabled bool DEFAULT TRUE NOT NULL,
 	csat_enabled bool DEFAULT false NOT NULL,
 	prompt_tags_on_reply bool DEFAULT false NOT NULL,
+	reopen_window_hours INT DEFAULT 0 NOT NULL,
 	config jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"from" TEXT NULL,
 	from_name_template TEXT NOT NULL DEFAULT '',
@@ -194,6 +195,7 @@ CREATE TABLE users (
     CONSTRAINT constraint_users_on_last_name CHECK (LENGTH(last_name) <= 140)
 );
 CREATE INDEX index_tgrm_users_on_email ON users USING GIN (email gin_trgm_ops);
+CREATE INDEX index_tgrm_users_on_phone_number ON users USING GIN (phone_number gin_trgm_ops);
 CREATE INDEX index_users_on_api_key ON users(api_key);
 CREATE INDEX index_users_on_availability_status_when_agent ON users(availability_status) WHERE type = 'agent' AND deleted_at IS NULL;
 CREATE UNIQUE INDEX index_unique_users_on_email_when_type_is_agent
@@ -269,6 +271,7 @@ CREATE TABLE conversations (
     last_reply_at TIMESTAMPTZ NULL,
     closed_at TIMESTAMPTZ NULL,
     resolved_at TIMESTAMPTZ NULL,
+    last_resolved_at TIMESTAMPTZ NULL,
 
 	"subject" TEXT NULL,
 	waiting_since TIMESTAMPTZ NULL,
@@ -282,7 +285,8 @@ CREATE TABLE conversations (
 	last_interaction_at TIMESTAMPTZ NULL,
 	next_sla_deadline_at TIMESTAMPTZ NULL,
 	snoozed_until TIMESTAMPTZ NULL,
-	last_continuity_email_sent_at TIMESTAMPTZ NULL
+	last_continuity_email_sent_at TIMESTAMPTZ NULL,
+	last_inbound_at TIMESTAMPTZ NULL
 );
 CREATE INDEX index_conversations_on_assigned_user_id ON conversations (assigned_user_id);
 CREATE INDEX index_conversations_on_assigned_team_id ON conversations (assigned_team_id);
@@ -298,6 +302,7 @@ CREATE INDEX index_conversations_on_last_interaction_at ON conversations (last_i
 CREATE INDEX index_conversations_on_next_sla_deadline_at ON conversations (next_sla_deadline_at);
 CREATE INDEX index_conversations_on_waiting_since ON conversations (waiting_since);
 CREATE INDEX index_conversations_on_last_continuity_email_sent_at ON conversations (last_continuity_email_sent_at);
+CREATE INDEX index_conversations_on_last_inbound_at ON conversations (last_inbound_at);
 
 DROP TABLE IF EXISTS conversation_messages CASCADE;
 CREATE TABLE conversation_messages (
@@ -502,6 +507,35 @@ CREATE TABLE templates (
 CREATE UNIQUE INDEX index_unique_templates_on_is_default_when_is_default_is_true ON templates USING btree (is_default)
 WHERE (is_default = true);
 
+DROP TABLE IF EXISTS whatsapp_templates CASCADE;
+CREATE TABLE whatsapp_templates (
+	id SERIAL PRIMARY KEY,
+	created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+	updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+	inbox_id INT REFERENCES inboxes(id) ON DELETE CASCADE ON UPDATE CASCADE NOT NULL,
+	meta_template_id TEXT NULL,
+	name TEXT NOT NULL,
+	language TEXT NOT NULL,
+	category TEXT NOT NULL,
+	status TEXT DEFAULT 'PENDING' NOT NULL,
+	header_type TEXT NULL,
+	header_content TEXT NULL,
+	body_content TEXT NOT NULL,
+	footer_content TEXT NULL,
+	buttons JSONB DEFAULT '[]'::jsonb NOT NULL,
+	sample_values JSONB DEFAULT '{}'::jsonb NOT NULL,
+	rejection_reason TEXT NULL,
+	component_types TEXT[] NULL,
+	CONSTRAINT constraint_whatsapp_templates_on_name CHECK (length(name) <= 512),
+	CONSTRAINT constraint_whatsapp_templates_on_language CHECK (length(language) <= 20),
+	CONSTRAINT constraint_whatsapp_templates_on_category CHECK (length(category) <= 32),
+	CONSTRAINT constraint_whatsapp_templates_on_status CHECK (length(status) <= 32),
+	CONSTRAINT constraint_whatsapp_templates_on_header_type CHECK (length(header_type) <= 32)
+);
+CREATE UNIQUE INDEX index_unique_whatsapp_templates_on_inbox_name_language ON whatsapp_templates (inbox_id, name, language);
+CREATE INDEX index_whatsapp_templates_on_inbox_id ON whatsapp_templates (inbox_id);
+CREATE INDEX index_whatsapp_templates_on_meta_template_id ON whatsapp_templates (meta_template_id);
+
 DROP TABLE IF EXISTS conversation_tags CASCADE;
 CREATE TABLE conversation_tags (
 	id BIGSERIAL PRIMARY KEY,
@@ -686,6 +720,7 @@ CREATE TABLE help_centers (
 	theme JSONB NOT NULL DEFAULT '{}',
 	custom_domain TEXT NOT NULL DEFAULT '',
 	template TEXT NOT NULL DEFAULT 'classic',
+	livechat_inbox_id INTEGER NULL REFERENCES inboxes(id) ON DELETE SET NULL,
 	CONSTRAINT constraint_help_centers_on_template CHECK (template IN ('docs', 'classic'))
 );
 
@@ -716,6 +751,7 @@ CREATE TABLE help_articles (
 	collection_id INTEGER NOT NULL REFERENCES article_collections(id) ON DELETE CASCADE,
 	author_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
 	created_by BIGINT NULL REFERENCES users(id) ON DELETE SET NULL,
+	translation_group_id UUID NOT NULL DEFAULT gen_random_uuid(),
 	slug TEXT NOT NULL,
 	locale TEXT NOT NULL DEFAULT 'en',
 	title TEXT NOT NULL,
@@ -738,6 +774,7 @@ CREATE TABLE help_articles (
 	CONSTRAINT constraint_help_articles_on_status CHECK (status IN ('draft', 'published'))
 );
 CREATE UNIQUE INDEX index_unique_help_articles_on_collection_slug_locale ON help_articles(collection_id, slug, locale);
+CREATE UNIQUE INDEX index_unique_help_articles_on_translation_group_locale ON help_articles(translation_group_id, locale);
 CREATE INDEX index_help_articles_on_collection_id ON help_articles(collection_id);
 CREATE INDEX index_help_articles_on_author_id ON help_articles(author_id);
 CREATE INDEX index_help_articles_on_title_trgm ON help_articles USING gin (title gin_trgm_ops);
@@ -776,6 +813,9 @@ CREATE TABLE ai_tools (
 	parameters JSONB NOT NULL DEFAULT '{}',
 	enabled BOOLEAN NOT NULL DEFAULT true,
 	requires_verification BOOLEAN NOT NULL DEFAULT true,
+	copilot_enabled BOOLEAN NOT NULL DEFAULT false,
+	generate_reply_enabled BOOLEAN NOT NULL DEFAULT false,
+	requires_agent_approval BOOLEAN NOT NULL DEFAULT true,
 	CONSTRAINT constraint_ai_tools_on_name CHECK (name ~ '^[a-zA-Z0-9_-]+$' AND length(name) <= 64)
 );
 
@@ -886,6 +926,19 @@ CREATE TABLE contact_notes (
 	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE INDEX index_contact_notes_on_contact_id_created_at ON contact_notes (contact_id, created_at);
+
+DROP TABLE IF EXISTS contact_channel_identities CASCADE;
+CREATE TABLE contact_channel_identities (
+	id BIGSERIAL PRIMARY KEY,
+	created_at TIMESTAMPTZ DEFAULT NOW(),
+	updated_at TIMESTAMPTZ DEFAULT NOW(),
+	contact_id BIGINT REFERENCES users(id) ON DELETE CASCADE ON UPDATE CASCADE NOT NULL,
+	channel channels NOT NULL,
+	identifier TEXT NOT NULL,
+	CONSTRAINT constraint_contact_channel_identities_on_identifier CHECK (length(identifier) <= 1000)
+);
+CREATE UNIQUE INDEX index_unique_contact_channel_identities_on_channel_identifier ON contact_channel_identities (channel, identifier);
+CREATE INDEX index_contact_channel_identities_on_contact_id ON contact_channel_identities (contact_id);
 
 DROP TABLE IF EXISTS activity_logs CASCADE;
 CREATE TABLE activity_logs (
@@ -998,6 +1051,26 @@ CREATE TABLE notification_email_queue (
 	CONSTRAINT constraint_uniq_notification_email_queue UNIQUE (user_id, notification_type, conversation_id)
 );
 CREATE INDEX index_notification_email_queue_on_send_at ON notification_email_queue(send_at);
+
+DROP TABLE IF EXISTS widget_campaign_deliveries CASCADE;
+CREATE TABLE widget_campaign_deliveries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    campaign_id UUID NOT NULL,
+    inbox_id INTEGER NOT NULL REFERENCES inboxes(id) ON DELETE CASCADE,
+    browser_key UUID NOT NULL,
+    session_key UUID NOT NULL,
+    contact_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+    snapshot JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    displayed BOOLEAN NOT NULL DEFAULT FALSE,
+    opened BOOLEAN NOT NULL DEFAULT FALSE,
+    dismissed BOOLEAN NOT NULL DEFAULT FALSE,
+    replied BOOLEAN NOT NULL DEFAULT FALSE,
+    conversation_uuid UUID REFERENCES conversations(uuid) ON DELETE SET NULL
+);
+CREATE INDEX idx_widget_campaign_browser ON widget_campaign_deliveries(inbox_id, browser_key, created_at DESC);
+CREATE INDEX idx_widget_campaign_contact ON widget_campaign_deliveries(inbox_id, contact_id, created_at DESC) WHERE contact_id IS NOT NULL;
+CREATE INDEX idx_widget_campaign_stats ON widget_campaign_deliveries(inbox_id, campaign_id, created_at);
 
 INSERT INTO ai_providers
 ("name", provider, type, config, is_default)

@@ -188,6 +188,7 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 
 	// Inboxes.
 	g.GET("/api/v1/inboxes", auth(handleGetInboxes))
+	g.GET("/api/v1/inboxes/{id}/campaign-stats", perm(handleCampaignStats, "inboxes:manage"))
 	g.GET("/api/v1/inboxes/{id}", perm(handleGetInbox, "inboxes:manage"))
 	g.POST("/api/v1/inboxes", perm(handleCreateInbox, "inboxes:manage"))
 	g.PUT("/api/v1/inboxes/{id}/toggle", perm(handleToggleInbox, "inboxes:manage"))
@@ -286,6 +287,8 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.POST("/api/v1/ai/summarize", perm(handleAISummarizeConversation, "messages:write_private"))
 	g.POST("/api/v1/ai/suggest-tags", auth(handleAISuggestTags))
 	g.POST("/api/v1/ai/copilot", auth(handleAICopilot))
+	g.POST("/api/v1/ai/tool-runs/{id}/approve", auth(handleApproveAIToolRun))
+	g.POST("/api/v1/ai/tool-runs/{id}/decline", auth(handleDeclineAIToolRun))
 	g.GET("/api/v1/ai/copilot/messages", auth(handleGetCopilotMessages))
 	g.DELETE("/api/v1/ai/copilot/messages", auth(handleClearCopilotMessages))
 
@@ -329,6 +332,9 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.PUT("/api/v1/articles/{id}", perm(clearsHCCache(handleUpdateArticle), "help_center:manage"))
 	g.PUT("/api/v1/articles/{id}/collection", perm(clearsHCCache(handleMoveArticle), "help_center:manage"))
 	g.PUT("/api/v1/articles/{id}/status", perm(clearsHCCache(handleUpdateArticleStatus), "help_center:manage"))
+	g.GET("/api/v1/help-centers/{id}/linkable-articles", perm(handleGetLinkableArticles, "help_center:manage"))
+	g.PUT("/api/v1/articles/{id}/link-translation", perm(clearsHCCache(handleLinkArticleTranslation), "help_center:manage"))
+	g.PUT("/api/v1/articles/{id}/unlink-translation", perm(clearsHCCache(handleUnlinkArticleTranslation), "help_center:manage"))
 	g.GET("/api/v1/help-centers/{id}/insights", perm(handleGetHelpCenterInsights, "help_center:manage"))
 
 	// Public help center JSON API.
@@ -373,14 +379,35 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	// Widget APIs.
 	g.GET("/api/v1/widget/chat/settings/launcher", rateLimit(validateWidgetInbox(handleGetChatLauncherSettings), "widget"))
 	g.GET("/api/v1/widget/chat/settings", rateLimit(validateWidgetInbox(handleGetChatSettings), "widget"))
+	g.POST("/api/v1/widget/chat/campaigns/next", rateLimit(optionalWidgetAuth(handleWidgetCampaign), "widget"))
+	g.POST("/api/v1/widget/chat/campaigns/event", rateLimit(optionalWidgetAuth(handleWidgetCampaignEvent), "widget"))
+	g.GET("/api/v1/widget/chat/help", rateLimit(optionalWidgetAuth(handleWidgetHelp), "widget"))
+	g.GET("/api/v1/widget/chat/help/search", rateLimit(optionalWidgetAuth(handleWidgetHelpSearch), "widget"))
+	g.GET("/api/v1/widget/chat/help/articles/{article_slug}", rateLimit(optionalWidgetAuth(handleWidgetHelpArticle), "widget"))
 	g.POST("/api/v1/widget/chat/auth/exchange", rateLimit(validateWidgetInbox(handleAuthExchange), "widget"))
 	g.GET("/api/v1/widget/chat/auth/me", rateLimit(widgetAuth(handleWidgetAuthMe), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/init", rateLimit(widgetAuth(handleChatInit), "widget"))
 	g.GET("/api/v1/widget/chat/conversations", rateLimit(widgetAuth(handleGetConversations), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/{uuid}/update-last-seen", rateLimit(widgetAuth(handleChatUpdateLastSeen), "widget"))
 	g.GET("/api/v1/widget/chat/conversations/{uuid}", rateLimit(widgetAuth(handleChatGetConversation), "widget"))
+	g.GET("/api/v1/widget/chat/conversations/{uuid}/transcript", rateLimit(widgetAuth(handleWidgetTranscript), "widget"))
 	g.POST("/api/v1/widget/chat/conversations/{uuid}/message", rateLimit(widgetAuth(handleChatSendMessage), "widget"))
+	g.POST("/api/v1/widget/chat/conversations/{uuid}/handoff-form", rateLimit(widgetAuth(handleChatSubmitHandoffForm), "widget"))
 	g.POST("/api/v1/widget/media/upload", rateLimit(widgetAuth(handleWidgetMediaUpload), "widget"))
+
+	// WhatsApp.
+	g.GET("/webhooks/whatsapp/{inbox_id}", rateLimit(handleWhatsAppWebhookVerify, "public"))
+	g.POST("/webhooks/whatsapp/{inbox_id}", handleWhatsAppWebhookEvent)
+
+	g.GET("/api/v1/whatsapp/contacts/{contact_id}/open-conversation", perm(handleGetWhatsAppOpenConversation, "conversations:read"))
+
+	// WhatsApp templates.
+	g.GET("/api/v1/whatsapp/templates", auth(handleListWhatsAppTemplates))
+	g.GET("/api/v1/whatsapp/templates/{id}", perm(handleGetWhatsAppTemplate, "inboxes:manage"))
+	g.POST("/api/v1/whatsapp/templates", perm(handleCreateWhatsAppTemplate, "inboxes:manage"))
+	g.PUT("/api/v1/whatsapp/templates/{id}", perm(handleUpdateWhatsAppTemplate, "inboxes:manage"))
+	g.DELETE("/api/v1/whatsapp/templates/{id}", perm(handleDeleteWhatsAppTemplate, "inboxes:manage"))
+	g.POST("/api/v1/whatsapp/templates/sync", perm(handleSyncWhatsAppTemplates, "inboxes:manage"))
 
 	// getAndHead registers both methods: uptime checkers and link validators probe with HEAD.
 	getAndHead := func(path string, h fastglue.FastRequestHandler) {
@@ -577,7 +604,9 @@ func serveWidgetJS(r *fastglue.Request) error {
 	app := r.Context.(*App)
 
 	r.RequestCtx.Response.Header.Set("Content-Type", "application/javascript")
-	r.RequestCtx.Response.Header.Set("Cache-Control", "no-cache")
+	r.RequestCtx.Response.Header.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	r.RequestCtx.Response.Header.Set("Pragma", "no-cache")
+	r.RequestCtx.Response.Header.Set("Expires", "0")
 
 	file, err := app.fs.Get("static/widget.js")
 	if err != nil {
@@ -644,8 +673,10 @@ func getOptionalPagination(r *fastglue.Request) (page, pageSize int) {
 func sendErrorEnvelope(r *fastglue.Request, err error) error {
 	e, ok := err.(envelope.Error)
 	if !ok {
+		app := r.Context.(*App)
+		app.lo.Error("non-envelope error reached sendErrorEnvelope", "path", string(r.RequestCtx.Path()), "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError,
-			"Error interface conversion failed", nil, fastglue.ErrorType(envelope.GeneralError))
+			app.i18n.T("globals.messages.somethingWentWrong"), nil, fastglue.ErrorType(envelope.GeneralError))
 	}
 	return r.SendErrorEnvelope(e.Code, e.Error(), e.Data, fastglue.ErrorType(e.ErrorType))
 }
