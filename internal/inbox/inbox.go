@@ -105,6 +105,9 @@ type Manager struct {
 	usrStore      UserStore
 	wg            sync.WaitGroup
 	encryptionKey string
+	// receiveCtx is the context receivers run under, set by Start. Until Start (and once it is
+	// cancelled, e.g. leadership lost) inboxes are registered for sending but receive nothing.
+	receiveCtx context.Context
 }
 
 // Prepared queries.
@@ -302,8 +305,9 @@ func (m *Manager) InitInboxes(initFn initFn) error {
 }
 
 // ReloadInbox reloads a single inbox by ID. It stops the old receiver,
-// fetches the current state from DB, and re-initializes if active.
-func (m *Manager) ReloadInbox(ctx context.Context, id int, initFn initFn) error {
+// fetches the current state from DB, and re-initializes if active. The receiver is
+// restarted only while receivers are running (see Start).
+func (m *Manager) ReloadInbox(id int, initFn initFn) error {
 	// Stop old receiver and close old inbox.
 	m.stopInbox(id)
 
@@ -327,8 +331,19 @@ func (m *Manager) ReloadInbox(ctx context.Context, id int, initFn initFn) error 
 		return fmt.Errorf("initializing inbox %s: %w", record.Name, err)
 	}
 	m.inboxes[inbox.Identifier()] = inbox
-	m.startReceiver(ctx, inbox)
+	if ctx := m.activeReceiveCtx(); ctx != nil {
+		m.startReceiver(ctx, inbox)
+	}
 	return nil
+}
+
+// activeReceiveCtx returns the context receivers run under, or nil when receivers are not
+// running on this instance (Start not called, or its context cancelled). Caller must hold m.mu.
+func (m *Manager) activeReceiveCtx() context.Context {
+	if m.receiveCtx == nil || m.receiveCtx.Err() != nil {
+		return nil
+	}
+	return m.receiveCtx
 }
 
 // Update updates an inbox in the DB.
@@ -582,11 +597,17 @@ func (m *Manager) startReceiver(ctx context.Context, inb Inbox) {
 	}()
 }
 
-// Start starts the receiver for each inbox.
+// Start starts the receiver for each inbox under ctx. In a multi-instance deployment only the
+// leader calls it, so each mailbox is polled once; cancelling ctx stops the receivers while the
+// inboxes stay registered for sending. Start may be called again with a new ctx.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, inb := range m.inboxes {
+	m.receiveCtx = ctx
+	for id, inb := range m.inboxes {
+		if rs, ok := m.receivers[id]; ok {
+			rs.cancel()
+		}
 		m.startReceiver(ctx, inb)
 	}
 	return nil
