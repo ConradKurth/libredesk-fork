@@ -11,6 +11,10 @@ func TestClaimsTeammateAction(t *testing.T) {
 		"Someone from our team will reach out about the refund.",
 		"Our team is going to review the photos and get back to you.",
 		"We will send the missing items today.",
+		// Prod 2026-10-04: a double-charge ticket stayed with the assistant after this reply.
+		"Thanks for the clarification, Rachel. It looks like a separate order may have been placed in addition to your regular subscription charge. I’ll have a teammate review your account and the recent orders to determine why the extra charge appeared.",
+		"I'll pass this along to our support team so they can sort out the refund.",
+		"I’m escalating this to a specialist now.",
 		"I don’t see a 0 % menthol vape juice in our catalog at the moment, so a teammate will check on any upcoming options for you.",
 	}
 	for _, reply := range claims {
@@ -31,6 +35,9 @@ func TestClaimsTeammateAction(t *testing.T) {
 		"Orders are usually processed within 24 hours and ship from our warehouse.",
 		"Thanks for contacting Cyclone Support. Did that resolve your question?",
 		"Once it arrives, you can start a return from your account page.",
+		"I'll have a look at the options for you: the Gust Pro comes in 20 flavors.",
+		"If you'd like, I'll have a teammate check on it.",
+		"I will get you the tracking link from the order tool.",
 	}
 	for _, reply := range notClaims {
 		if claimsTeammateAction(reply) {
