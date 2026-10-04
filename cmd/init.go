@@ -60,6 +60,7 @@ import (
 	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
 	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
+	"github.com/abhinavxd/libredesk/internal/ws/redisbackplane"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
 	kjson "github.com/knadh/koanf/parsers/json"
@@ -765,7 +766,7 @@ func initEmailInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrS
 }
 
 // initLiveChatInbox initializes the live chat inbox.
-func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String)) (inbox.Inbox, error) {
+func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String), relay *livechat.Relay) (inbox.Inbox, error) {
 	var config livechat.Config
 
 	// Load JSON data into Koanf.
@@ -783,6 +784,7 @@ func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, u
 		Config:        config,
 		Lo:            initLogger("livechat_inbox"),
 		SignAvatarURL: signAvatarURL,
+		Relay:         relay,
 	})
 
 	if err != nil {
@@ -818,13 +820,13 @@ func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, c
 }
 
 // makeInboxInitializer creates an inbox initializer function.
-func makeInboxInitializer(mgr *inbox.Manager, signAvatarURL func(*null.String), waClient *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) func(imodels.Inbox, inbox.MessageStore, inbox.UserStore) (inbox.Inbox, error) {
+func makeInboxInitializer(mgr *inbox.Manager, signAvatarURL func(*null.String), waClient *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback, widgetRelay *livechat.Relay) func(imodels.Inbox, inbox.MessageStore, inbox.UserStore) (inbox.Inbox, error) {
 	return func(inboxR imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore) (inbox.Inbox, error) {
 		switch inboxR.Channel {
 		case inbox.ChannelEmail:
 			return initEmailInbox(inboxR, msgStore, usrStore, mgr, authStatusHook)
 		case inbox.ChannelLiveChat:
-			return initLiveChatInbox(inboxR, msgStore, usrStore, signAvatarURL)
+			return initLiveChatInbox(inboxR, msgStore, usrStore, signAvatarURL, widgetRelay)
 		case inbox.ChannelWhatsApp:
 			return initWhatsAppInbox(inboxR, msgStore, waClient, sourceUpdater)
 		default:
@@ -833,28 +835,51 @@ func makeInboxInitializer(mgr *inbox.Manager, signAvatarURL func(*null.String), 
 	}
 }
 
-// reloadInbox reloads a single inbox by ID using the signal-aware context.
+// reloadInbox reloads an inbox after it changed, on this instance and, via the
+// reload relay, on every other instance (each holds its own copy).
 func reloadInbox(app *App, id int) error {
+	err := reloadInboxLocal(app, id)
+	app.inboxReloads.publish(id)
+	return err
+}
+
+// reloadInboxLocal reloads a single inbox by ID on this instance. Its receiver restarts
+// only on the instance running receivers (the leader).
+func reloadInboxLocal(app *App, id int) error {
 	app.lo.Info("reloading inbox", "id", id)
 	app.inboxAuthErrors.Delete(id)
 	if err := ensureWhatsAppIngester(app); err != nil {
 		app.lo.Error("error starting whatsapp ingester after an inbox change", "id", id, "error", err)
 	}
-	return app.inbox.ReloadInbox(app.ctx, id, makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app)))
+	return app.inbox.ReloadInbox(id, inboxInitializer(app))
 }
 
-// startInboxes registers the active inboxes and starts receiver for each.
-func startInboxes(ctx context.Context, mgr *inbox.Manager, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String), waClient *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater, authStatusHook email.AuthStatusCallback) {
-	mgr.SetMessageStore(msgStore)
-	mgr.SetUserStore(usrStore)
+func inboxInitializer(app *App) func(imodels.Inbox, inbox.MessageStore, inbox.UserStore) (inbox.Inbox, error) {
+	return makeInboxInitializer(app.inbox, app.conversation.SignAvatarURL, app.whatsappClient, app.conversation, makeInboxAuthStatusHook(app), app.widgetRelay)
+}
 
-	if err := mgr.InitInboxes(makeInboxInitializer(mgr, signAvatarURL, waClient, sourceUpdater, authStatusHook)); err != nil {
+// initInboxes registers the active inboxes on this instance so it can send through them
+// and serve widget connections. Receivers are started separately, by the leader.
+func initInboxes(app *App) {
+	app.inbox.SetMessageStore(app.conversation)
+	app.inbox.SetUserStore(app.user)
+	if err := app.inbox.InitInboxes(inboxInitializer(app)); err != nil {
 		log.Fatalf("error initializing inboxes: %v", err)
 	}
+}
 
-	if err := mgr.Start(ctx); err != nil {
-		log.Fatalf("error starting inboxes: %v", err)
-	}
+// initWidgetRelay relays live chat widget payloads between instances over Redis, since a
+// contact's widget websocket may be connected to a different replica than the one sending.
+func initWidgetRelay(rdb *redis.Client, mgr *inbox.Manager) *livechat.Relay {
+	lo := initLogger("widget-relay")
+	return livechat.NewRelay(redisbackplane.New(rdb, widgetRelayChannel, lo), lo, func(id int) *livechat.LiveChat {
+		inb, err := mgr.Get(id)
+		if err != nil {
+			return nil
+		}
+		lc, _ := inb.(*livechat.LiveChat)
+		return lc
+	})
 }
 
 // initWhatsAppClient constructs the shared Meta Graph API client.

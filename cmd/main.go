@@ -26,6 +26,7 @@ import (
 	"github.com/abhinavxd/libredesk/internal/colorlog"
 	"github.com/abhinavxd/libredesk/internal/csat"
 	customAttribute "github.com/abhinavxd/libredesk/internal/custom_attribute"
+	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat/proactive"
 	"github.com/abhinavxd/libredesk/internal/macro"
 	notifier "github.com/abhinavxd/libredesk/internal/notification"
@@ -100,6 +101,13 @@ const (
 	// broadcasts are relayed between instances for multi-instance deployments.
 	wsBackplaneChannel = "libredesk:ws:broadcast"
 
+	// widgetRelayChannel relays live chat widget payloads (replies, typing,
+	// conversation updates) to the instance holding the contact's websocket.
+	widgetRelayChannel = "libredesk:ws:widget"
+
+	// inboxReloadChannel tells every instance to reload an inbox after it changes.
+	inboxReloadChannel = "libredesk:inbox:reload"
+
 	// clusterLeaderKey is the Redis key holding the current leader's lease when
 	// cluster.enabled is set. Only the lease holder runs the singleton background
 	// jobs (see startLeaderJobs in Main), so a multi-instance deployment does not
@@ -159,6 +167,8 @@ type App struct {
 	// Inbox IDs whose provider credentials were recently rejected, keyed to the last error time.
 	inboxAuthErrors sync.Map
 	wsHub           *ws.Hub
+	widgetRelay     *livechat.Relay
+	inboxReloads    *inboxReloadRelay
 
 	// Global state that stores data on an available app update.
 	update *AppUpdate
@@ -358,12 +368,20 @@ func main() {
 		userNotification: userNotification,
 		whatsappClient:   waClient,
 		whatsappTemplate: waTemplates,
+		widgetRelay:      initWidgetRelay(rdb, inbox),
+		inboxReloads:     initInboxReloadRelay(rdb),
 		notificationPref: notificationPreference,
 		pushNotification: pushNotification,
 		wsHub:            wsHub,
 	}
 	app.consts.Store(constants)
 	helpCenterCacheOpts.Logger = log.New(helpCenterCacheLogWriter{lo: app.lo}, "", 0)
+
+	// Every instance registers the inboxes, so any replica can send through them and serve
+	// widget connections; only the leader starts their receivers (see startLeaderJobs).
+	initInboxes(app)
+	go app.widgetRelay.Consume(ctx)
+	go app.inboxReloads.consume(ctx, app)
 
 	waClient.SetAuthErrorHook(makeWhatsAppAuthErrorHook(app))
 	if err := ensureWhatsAppIngester(app); err != nil {
@@ -405,7 +423,10 @@ func main() {
 	// cluster-wide; when leadership is lost, leaderCtx is cancelled and every job
 	// stops. Handler-fed worker pools (started above) keep running on all replicas.
 	startLeaderJobs := func(leaderCtx context.Context) {
-		startInboxes(leaderCtx, inbox, conversation, user, conversation.SignAvatarURL, waClient, conversation, makeInboxAuthStatusHook(app))
+		// Receivers (IMAP polling) run on the leader only; the inboxes are already registered everywhere.
+		if err := inbox.Start(leaderCtx); err != nil {
+			log.Fatalf("error starting inboxes: %v", err)
+		}
 		go automation.RunTimeTriggers(leaderCtx)
 		go autoassigner.Run(leaderCtx, autoAssignInterval)
 		// The outgoing scanner needs the inboxes registered, else queued messages fail with "inbox not found".

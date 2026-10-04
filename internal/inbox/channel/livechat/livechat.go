@@ -226,6 +226,7 @@ type LiveChat struct {
 	signAvatarURL func(*null.String)   // Signs a raw /uploads/ avatar path into a signed URL.
 	clients       map[string][]*Client // Maps user IDs to slices of clients (to handle multiple devices)
 	clientsMutex  sync.RWMutex
+	relay         *Relay // Fans widget payloads out to other instances; nil when single-instance.
 }
 
 // Opts holds the options required for the live chat inbox.
@@ -236,6 +237,8 @@ type Opts struct {
 	From          string
 	Lo            *logf.Logger
 	SignAvatarURL func(*null.String)
+	// Relay, when set, delivers widget payloads to clients connected to other instances.
+	Relay *Relay
 }
 
 // New returns a new instance of the live chat inbox.
@@ -250,6 +253,7 @@ func New(store inbox.MessageStore, userStore inbox.UserStore, opts Opts) (*LiveC
 		userStore:     userStore,
 		signAvatarURL: opts.SignAvatarURL,
 		clients:       make(map[string][]*Client),
+		relay:         opts.Relay,
 	}
 	return lc, nil
 }
@@ -411,11 +415,8 @@ func (lc *LiveChat) Send(message models.OutboundMessage) error {
 	}
 
 	msgReceiverStr := strconv.Itoa(message.MessageReceiverID)
-	lc.clientsMutex.RLock()
-	defer lc.clientsMutex.RUnlock()
-
-	clients, exists := lc.clients[msgReceiverStr]
-	if !exists {
+	// Without a relay only local clients can receive it, so skip the work when none are connected.
+	if lc.relay == nil && !lc.hasClients(msgReceiverStr) {
 		lc.lo.Debug("websocket client not connected for live chat message", "receiver_id", msgReceiverStr, "message_id", message.UUID)
 		return ErrClientNotConnected
 	}
@@ -461,18 +462,9 @@ func (lc *LiveChat) Send(message models.OutboundMessage) error {
 		return fmt.Errorf("failed to marshal message data: %w", err)
 	}
 
-	for _, client := range clients {
-		if client.closed.Load() {
-			continue
-		}
-		select {
-		case client.Channel <- messageJSON:
-			lc.lo.Info("message sent to live chat client", "client_id", client.ID, "message_id", message.UUID)
-		default:
-			lc.lo.Warn("client channel full, dropping message", "client_id", client.ID, "message_id", message.UUID)
-		}
+	if n := lc.dispatch(msgReceiverStr, messageJSON); n > 0 {
+		lc.lo.Info("message sent to live chat client", "receiver_id", msgReceiverStr, "clients", n, "message_id", message.UUID)
 	}
-
 	return nil
 }
 
@@ -562,9 +554,6 @@ func (lc *LiveChat) RemoveClient(c *Client) {
 
 // BroadcastTypingToClients broadcasts typing status to specific widget clients for a conversation.
 func (lc *LiveChat) BroadcastTypingToClients(conversationUUID string, contactID int, isTyping bool) {
-	lc.clientsMutex.RLock()
-	defer lc.clientsMutex.RUnlock()
-
 	// Create typing status message for widget clients
 	typingMessage := map[string]interface{}{
 		"type": "typing",
@@ -581,27 +570,11 @@ func (lc *LiveChat) BroadcastTypingToClients(conversationUUID string, contactID 
 	}
 
 	// Only send to the specific contact's clients
-	contactIDStr := strconv.Itoa(contactID)
-	if clients, exists := lc.clients[contactIDStr]; exists {
-		for _, client := range clients {
-			if client.closed.Load() {
-				continue
-			}
-			select {
-			case client.Channel <- messageJSON:
-				lc.lo.Debug("typing status sent to widget client", "contact_id", contactID, "client_id", client.ID, "conversation_uuid", conversationUUID, "is_typing", isTyping)
-			default:
-				lc.lo.Warn("client channel full, dropping typing message", "contact_id", contactID, "client_id", client.ID)
-			}
-		}
-	}
+	lc.dispatch(strconv.Itoa(contactID), messageJSON)
 }
 
 // BroadcastMessageToClients broadcasts a new message to specific widget clients.
 func (lc *LiveChat) BroadcastMessageToClients(conversationUUID string, contactID int, messageData any) {
-	lc.clientsMutex.RLock()
-	defer lc.clientsMutex.RUnlock()
-
 	msg := map[string]any{
 		"type": "new_message",
 		"data": messageData,
@@ -613,26 +586,11 @@ func (lc *LiveChat) BroadcastMessageToClients(conversationUUID string, contactID
 		return
 	}
 
-	contactIDStr := strconv.Itoa(contactID)
-	if clients, exists := lc.clients[contactIDStr]; exists {
-		for _, client := range clients {
-			if client.closed.Load() {
-				continue
-			}
-			select {
-			case client.Channel <- messageJSON:
-			default:
-				lc.lo.Warn("client channel full, dropping message broadcast", "contact_id", contactID, "client_id", client.ID)
-			}
-		}
-	}
+	lc.dispatch(strconv.Itoa(contactID), messageJSON)
 }
 
 // BroadcastConversationToClients broadcasts conversation updates to specific widget clients.
 func (lc *LiveChat) BroadcastConversationToClients(conversationUUID string, contactID int, conversationData interface{}) {
-	lc.clientsMutex.RLock()
-	defer lc.clientsMutex.RUnlock()
-
 	conversationMessage := map[string]any{
 		"type": "conversation_update",
 		"data": conversationData,
@@ -645,18 +603,43 @@ func (lc *LiveChat) BroadcastConversationToClients(conversationUUID string, cont
 	}
 
 	// Only send to the specific contact's clients
-	contactIDStr := strconv.Itoa(contactID)
-	if clients, exists := lc.clients[contactIDStr]; exists {
-		for _, client := range clients {
-			if client.closed.Load() {
-				continue
-			}
-			select {
-			case client.Channel <- messageJSON:
-				lc.lo.Debug("conversation update sent to widget client", "contact_id", contactID, "client_id", client.ID, "conversation_uuid", conversationUUID)
-			default:
-				lc.lo.Warn("client channel full, dropping conversation update", "contact_id", contactID, "client_id", client.ID)
-			}
+	lc.dispatch(strconv.Itoa(contactID), messageJSON)
+}
+
+// dispatch delivers a payload to the contact's locally connected clients and relays it to
+// the other instances, where the contact's widget may be connected instead. It returns the
+// number of local clients reached.
+func (lc *LiveChat) dispatch(contactID string, payload []byte) int {
+	n := lc.deliverLocal(contactID, payload)
+	if lc.relay != nil {
+		lc.relay.publish(lc.id, contactID, payload)
+	}
+	return n
+}
+
+// deliverLocal sends a payload to the contact's clients connected to this instance and
+// returns how many received it.
+func (lc *LiveChat) deliverLocal(contactID string, payload []byte) int {
+	lc.clientsMutex.RLock()
+	defer lc.clientsMutex.RUnlock()
+	n := 0
+	for _, client := range lc.clients[contactID] {
+		if client.closed.Load() {
+			continue
+		}
+		select {
+		case client.Channel <- payload:
+			n++
+		default:
+			lc.lo.Warn("client channel full, dropping widget payload", "contact_id", contactID, "client_id", client.ID)
 		}
 	}
+	return n
+}
+
+// hasClients reports whether the contact has a client connected to this instance.
+func (lc *LiveChat) hasClients(contactID string) bool {
+	lc.clientsMutex.RLock()
+	defer lc.clientsMutex.RUnlock()
+	return len(lc.clients[contactID]) > 0
 }
