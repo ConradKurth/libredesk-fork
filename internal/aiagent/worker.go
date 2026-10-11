@@ -266,7 +266,7 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	}
 
 	contactLines := contactFieldLines(conv.Contact)
-	systemPrompt := buildSystemPrompt(assistant)
+	systemPrompt := buildSystemPrompt(assistant) + "\n\n" + currentTimeLine(m.localNow())
 	if len(contactLines) == 0 {
 		systemPrompt += "\n\n" + noContactIdentityNote
 	}
@@ -618,6 +618,18 @@ func (m *Manager) actorUser(a models.Assistant) umodels.User {
 	return umodels.User{ID: a.UserID, FirstName: a.Name, Type: umodels.UserTypeAIAssistant}
 }
 
+// localNow returns the current time in the app timezone, falling back to fallbackTimezone.
+func (m *Manager) localNow() time.Time {
+	tz := m.setting.GetAppTimezone()
+	loc, err := time.LoadLocation(tz)
+	if tz == "" || err != nil {
+		if loc, err = time.LoadLocation(fallbackTimezone); err != nil {
+			return time.Now()
+		}
+	}
+	return time.Now().In(loc)
+}
+
 // PreviewReply runs the assistant against a test message with no side effects and returns the reply and the knowledge base items it was grounded in.
 func (m *Manager) PreviewReply(ctx context.Context, assistantID int, message string) (string, []models.PreviewSource, error) {
 	a, err := m.GetAssistant(assistantID)
@@ -634,7 +646,7 @@ func (m *Manager) PreviewReply(ctx context.Context, assistantID int, message str
 	runCtx, cancel := context.WithTimeout(ctx, livechatRunTimeout)
 	defer cancel()
 	// Preview is search-only: no custom tools (empty allowed set), no built-in, no side effects.
-	answer, err := m.ai.RunAgentWithTools(runCtx, buildSystemPrompt(a), history, m.maxSteps, ai.ToolContext{}, []int{}, false, false, tools)
+	answer, err := m.ai.RunAgentWithTools(runCtx, buildSystemPrompt(a)+"\n\n"+currentTimeLine(m.localNow()), history, m.maxSteps, ai.ToolContext{}, []int{}, false, false, tools)
 	if err != nil {
 		return "", nil, err
 	}

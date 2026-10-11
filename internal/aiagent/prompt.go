@@ -3,6 +3,7 @@ package aiagent
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/abhinavxd/libredesk/internal/aiagent/models"
 	cmodels "github.com/abhinavxd/libredesk/internal/conversation/models"
@@ -46,6 +47,16 @@ const cannotAnswerNoHandoff = `If you cannot answer from the knowledge base, or 
 
 // noContactIdentityNote is a trusted, data-free system-prompt line for when nothing identifies the contact.
 const noContactIdentityNote = "You do not have any identifying details for this customer yet. If you need to identify them for a request, ask."
+
+// fallbackTimezone is used for the prompt's current-time line when app.timezone is unset or invalid.
+const fallbackTimezone = "America/Los_Angeles"
+
+// currentTimeLine is a trusted, data-free system-prompt line stating the local date and time, so the
+// model can reason about weekdays, weekends and delivery windows instead of guessing what day it is.
+func currentTimeLine(now time.Time) string {
+	return "Current date and time: " + now.Format("Monday, January 2, 2006, 3:04 PM MST") +
+		". Use this for anything about today, weekdays, business days, or delivery dates."
+}
 
 // verificationNote guides the OTP flow; the actual gate is enforced server-side, this only shapes UX.
 const verificationNote = `This customer is not verified yet. Some tools need a verified customer and will tell you so if you call them too early. To verify:

@@ -3,7 +3,20 @@ package aiagent
 import (
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestCurrentTimeLine(t *testing.T) {
+	loc, err := time.LoadLocation(fallbackTimezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 03:22 UTC on a Sunday is still Saturday evening in Pacific time; the line must say Saturday.
+	got := currentTimeLine(time.Date(2026, 10, 11, 3, 22, 0, 0, time.UTC).In(loc))
+	if !strings.Contains(got, "Saturday, October 10, 2026, 8:22 PM PDT") {
+		t.Errorf("currentTimeLine = %q, want Saturday, October 10, 2026, 8:22 PM PDT", got)
+	}
+}
 
 func TestNeutralizeMarkers(t *testing.T) {
 	// Content without the doubled-angle tokens must pass through untouched.
