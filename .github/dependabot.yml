@@ -1,0 +1,65 @@
+# Config lives on main (Dependabot reads only the default branch); updates target the deployed cyclone branch.
+version: 2
+updates:
+- package-ecosystem: gomod
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    go-minor-patch:
+      update-types:
+      - minor
+      - patch
+    go-security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+  target-branch: cyclone
+- package-ecosystem: npm
+  directory: /frontend
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    npm-minor-patch:
+      update-types:
+      - minor
+      - patch
+    npm-security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+  target-branch: cyclone
+- package-ecosystem: docker
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    docker-all:
+      patterns:
+      - '*'
+    docker-security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+  target-branch: cyclone
+- package-ecosystem: github-actions
+  directory: /
+  schedule:
+    interval: weekly
+    day: monday
+  open-pull-requests-limit: 5
+  groups:
+    actions-all:
+      patterns:
+      - '*'
+    actions-security:
+      applies-to: security-updates
+      patterns:
+      - '*'
+  target-branch: cyclone
