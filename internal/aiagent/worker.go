@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -261,6 +262,12 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		return
 	}
 	if turns >= assistant.MaxTurns {
+		// A thank-you after the cap closes the conversation; handing it off would open a human
+		// ticket for a finished chat and tell the customer they were passed to the team.
+		if isClosingAcknowledgement(m.messageText(*inbound), followsConfirmation(msgs)) {
+			m.resolve(conv, assistant)
+			return
+		}
 		m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffMaxTurns"))
 		return
 	}
@@ -408,6 +415,10 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
 	answer, answerSuggestions := splitSuggestions(answer)
 	confirm, confirmSuggestions := splitSuggestions(confirm)
+	// The question may be all that is left once a leaked options line is stripped from the answer.
+	if answer == "" && confirm != "" {
+		answer, answerSuggestions, confirm, confirmSuggestions = confirm, confirmSuggestions, "", nil
+	}
 	// Email gets one message; separate chat-style bubbles only suit the widget.
 	if conv.InboxChannel == channelEmail && confirm != "" {
 		answer, confirm = answer+"\n\n"+confirm, ""
@@ -948,13 +959,15 @@ func splitConfirmation(answer string) (string, string) {
 }
 
 func splitSuggestions(answer string) (string, []string) {
-	idx := strings.LastIndex(answer, suggestionsMarker)
-	if idx == -1 {
+	var body, payload string
+	if idx := strings.LastIndex(answer, suggestionsMarker); idx != -1 {
+		body = strings.TrimSpace(strings.ReplaceAll(answer[:idx], suggestionsMarker, ""))
+		payload = strings.TrimSpace(answer[idx+len(suggestionsMarker):])
+	} else if body, payload = splitBareSuggestions(answer); payload == "" {
 		return answer, nil
 	}
-	body := strings.TrimSpace(strings.ReplaceAll(answer[:idx], suggestionsMarker, ""))
 	var raw []string
-	if err := json.Unmarshal([]byte(strings.TrimSpace(answer[idx+len(suggestionsMarker):])), &raw); err != nil {
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return body, nil
 	}
 	suggestions := make([]string, 0, min(len(raw), 3))
@@ -969,6 +982,80 @@ func splitSuggestions(answer string) (string, []string) {
 		}
 	}
 	return body, suggestions
+}
+
+// bareSuggestionsLine matches an options array the model wrote without its [[suggestions]] marker,
+// sometimes missing a bracket: ["Yes, that helps","I need more assistance"] or "Yes","No"].
+var bareSuggestionsLine = regexp.MustCompile(`^\[?\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\]?,?$`)
+
+// splitBareSuggestions splits a trailing unmarked options array off answer and returns it as a
+// JSON array; payload is "" when the last line isn't one. Without this the array reaches the customer as text.
+func splitBareSuggestions(answer string) (body, payload string) {
+	trimmed := strings.TrimSpace(answer)
+	idx := strings.LastIndex(trimmed, "\n")
+	line := strings.TrimSpace(trimmed[idx+1:])
+	if !bareSuggestionsLine.MatchString(line) || (!strings.HasPrefix(line, "[") && !strings.Contains(line, "]")) {
+		return answer, ""
+	}
+	payload = strings.TrimSuffix(line, ",")
+	if !strings.HasPrefix(payload, "[") {
+		payload = "[" + payload
+	}
+	if !strings.HasSuffix(payload, "]") {
+		payload += "]"
+	}
+	body = ""
+	if idx != -1 {
+		body = strings.TrimSpace(trimmed[:idx])
+	}
+	return strings.TrimSuffix(body, ","), payload
+}
+
+// closingWords may make up a closing acknowledgement; closingSignals must appear in one, so a bare
+// "ok" or "yes" (which can mean "yes, hand me to a teammate") is not mistaken for a goodbye.
+var (
+	closingWords   = map[string]bool{"yes": true, "yeah": true, "yep": true, "ok": true, "okay": true, "that": true, "it": true, "this": true, "you": true, "so": true, "very": true, "much": true, "all": true, "good": true, "got": true, "sounds": true, "i": true, "really": true, "for": true, "your": true, "the": true, "help": true, "assistance": true, "info": true, "information": true, "quick": true, "again": true}
+	closingSignals = map[string]bool{"thanks": true, "thank": true, "thx": true, "ty": true, "appreciate": true, "appreciated": true, "helps": true, "helped": true, "perfect": true, "great": true, "awesome": true, "resolved": true}
+)
+
+// isClosingAcknowledgement reports whether text only thanks or confirms, with no new question or
+// request. After a "did that resolve it?" message a plain yes also closes.
+func isClosingAcknowledgement(text string, afterConfirmation bool) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" || strings.Contains(text, "?") {
+		return false
+	}
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r == '\'')
+	})
+	if len(words) == 0 || len(words) > 8 {
+		return false
+	}
+	signal := false
+	for _, w := range words {
+		switch {
+		case closingSignals[w]:
+			signal = true
+		case closingWords[w]:
+			if afterConfirmation && (w == "yes" || w == "yeah" || w == "yep") {
+				signal = true
+			}
+		default:
+			return false
+		}
+	}
+	return signal
+}
+
+// followsConfirmation reports whether the latest inbound message answers the assistant's
+// "did that resolve your question?" follow-up.
+func followsConfirmation(msgs []cmodels.Message) bool {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Type == cmodels.MessageOutgoing {
+			return messageMetaBool(msgs[i].Meta, "is_confirmation")
+		}
+	}
+	return false
 }
 
 func suggestedRepliesMeta(suggestions []string) map[string]any {
