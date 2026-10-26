@@ -69,6 +69,10 @@ func TestIsClosingAcknowledgement(t *testing.T) {
 		{"No, I need more help", true, false},
 		{"thanks, can you cancel it", false, false},
 		{"", true, false},
+		{"Yes, it did", true, true},
+		{"Yes, it does.", true, true},
+		{"Yes, thanks!", false, true},
+		{"It did not", true, false},
 	}
 	for _, c := range cases {
 		if got := isClosingAcknowledgement(c.text, c.afterConf); got != c.want {

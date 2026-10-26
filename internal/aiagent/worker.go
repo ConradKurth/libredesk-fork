@@ -261,13 +261,14 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 		return
 	}
+	// A thank-you (or a yes to "did that resolve it?") closes the conversation without asking the
+	// model, which tends to answer it with nothing (a no-answer handoff) or another "did that
+	// resolve it?". At the cap, handing it off would open a human ticket for a finished chat.
+	if isClosingAcknowledgement(m.messageText(*inbound), followsConfirmation(msgs)) {
+		m.resolve(conv, assistant)
+		return
+	}
 	if turns >= assistant.MaxTurns {
-		// A thank-you after the cap closes the conversation; handing it off would open a human
-		// ticket for a finished chat and tell the customer they were passed to the team.
-		if isClosingAcknowledgement(m.messageText(*inbound), followsConfirmation(msgs)) {
-			m.resolve(conv, assistant)
-			return
-		}
 		m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffMaxTurns"))
 		return
 	}
@@ -416,17 +417,26 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	answer, answerSuggestions := splitSuggestions(answer)
 	confirm, confirmSuggestions := splitSuggestions(confirm)
 	// The question may be all that is left once a leaked options line is stripped from the answer.
+	// asksConfirmation marks an answer that ends with the follow-up question, so a "yes" to it still
+	// closes. It is not is_confirmation: the answer counts toward the turn cap.
+	asksConfirmation := false
 	if answer == "" && confirm != "" {
 		answer, answerSuggestions, confirm, confirmSuggestions = confirm, confirmSuggestions, "", nil
+		asksConfirmation = true
 	}
 	// Email gets one message; separate chat-style bubbles only suit the widget.
 	if conv.InboxChannel == channelEmail && confirm != "" {
 		answer, confirm = answer+"\n\n"+confirm, ""
 		answerSuggestions, confirmSuggestions = nil, nil
+		asksConfirmation = true
 	}
 	if answer != "" {
 		m.lo.Debug("ai agent replying", "conversation_uuid", conv.UUID, "reply_len", len(answer), "resolved", outcome.resolved)
-		if err := m.postReply(conv, assistant, answer, suggestedRepliesMeta(answerSuggestions)); err != nil {
+		answerMeta := suggestedRepliesMeta(answerSuggestions)
+		if asksConfirmation {
+			answerMeta["asks_confirmation"] = true
+		}
+		if err := m.postReply(conv, assistant, answer, answerMeta); err != nil {
 			m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffError"))
 			return
 		}
@@ -1014,7 +1024,7 @@ func splitBareSuggestions(answer string) (body, payload string) {
 // closingWords may make up a closing acknowledgement; closingSignals must appear in one, so a bare
 // "ok" or "yes" (which can mean "yes, hand me to a teammate") is not mistaken for a goodbye.
 var (
-	closingWords   = map[string]bool{"yes": true, "yeah": true, "yep": true, "ok": true, "okay": true, "that": true, "it": true, "this": true, "you": true, "so": true, "very": true, "much": true, "all": true, "good": true, "got": true, "sounds": true, "i": true, "really": true, "for": true, "your": true, "the": true, "help": true, "assistance": true, "info": true, "information": true, "quick": true, "again": true}
+	closingWords   = map[string]bool{"yes": true, "yeah": true, "yep": true, "ok": true, "okay": true, "that": true, "it": true, "this": true, "you": true, "so": true, "very": true, "much": true, "all": true, "good": true, "got": true, "sounds": true, "i": true, "really": true, "for": true, "your": true, "the": true, "help": true, "assistance": true, "info": true, "information": true, "quick": true, "again": true, "did": true, "does": true, "do": true, "was": true, "is": true}
 	closingSignals = map[string]bool{"thanks": true, "thank": true, "thx": true, "ty": true, "appreciate": true, "appreciated": true, "helps": true, "helped": true, "perfect": true, "great": true, "awesome": true, "resolved": true}
 )
 
@@ -1052,7 +1062,7 @@ func isClosingAcknowledgement(text string, afterConfirmation bool) bool {
 func followsConfirmation(msgs []cmodels.Message) bool {
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Type == cmodels.MessageOutgoing {
-			return messageMetaBool(msgs[i].Meta, "is_confirmation")
+			return messageMetaBool(msgs[i].Meta, "is_confirmation") || messageMetaBool(msgs[i].Meta, "asks_confirmation")
 		}
 	}
 	return false
