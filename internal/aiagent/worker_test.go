@@ -80,3 +80,14 @@ func TestIsClosingAcknowledgement(t *testing.T) {
 		}
 	}
 }
+
+func TestTrimBlank(t *testing.T) {
+	for _, in := range []string{"\u200b", " \u200b\n", "\ufeff\u200d", ""} {
+		if got := trimBlank(in); got != "" {
+			t.Fatalf("%q: got %q, want empty", in, got)
+		}
+	}
+	if got := trimBlank("\u200b Hi there.\n"); got != "Hi there." {
+		t.Fatalf("got %q", got)
+	}
+}
