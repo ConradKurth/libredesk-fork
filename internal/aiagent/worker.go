@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 
 	"time"
 
@@ -413,7 +414,7 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		return
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
-	answer, confirm := splitConfirmation(strings.TrimSpace(answer))
+	answer, confirm := splitConfirmation(trimBlank(answer))
 	answer, answerSuggestions := splitSuggestions(answer)
 	confirm, confirmSuggestions := splitSuggestions(confirm)
 	// The question may be all that is left once a leaked options line is stripped from the answer.
@@ -460,6 +461,13 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		m.lo.Debug("ai agent no answer, handing off", "conversation_uuid", conv.UUID)
 		m.handoff(conv, assistant, m.i18n.T("ai.agent.handoffNoAnswer"))
 	}
+}
+
+// trimBlank trims whitespace and invisible format characters (zero-width space, joiners, BOM).
+// The model sometimes answers a "no reply needed" message with a lone U+200B: TrimSpace keeps it,
+// so the customer got a blank email instead of the no-answer handoff (2026-10-26).
+func trimBlank(s string) string {
+	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) })
 }
 
 // resolve runs after the reply is queued so the CSAT survey sent on resolve follows the answer.
