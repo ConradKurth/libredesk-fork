@@ -353,6 +353,7 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	stopTyping := m.keepTyping(conv.UUID)
 	answer, err := m.ai.RunAgentWithTools(runCtx, systemPrompt, history, m.maxSteps, tctx, assistant.ToolIDs, false, false, tools)
 	stopTyping()
+	answer = cleanReply(answer)
 	// A human agent may have taken over or resolved the conversation mid-run; if so, drop this
 	// run's reply and status actions instead of talking over them.
 	if fresh, ferr := m.convo.GetConversation(convID, "", ""); ferr == nil {
@@ -468,6 +469,24 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 // so the customer got a blank email instead of the no-answer handoff (2026-10-26).
 func trimBlank(s string) string {
 	return strings.TrimFunc(s, func(r rune) bool { return unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) })
+}
+
+// harmonyToken matches gpt-oss chat-format markers that sometimes leak into the answer text, e.g.
+// "<|start|>assistant<|channel|>final**The Gust Core…<|return|>" (preview, 2026-10-29).
+var harmonyToken = regexp.MustCompile(`<\|start\|>(?:assistant)?|<\|channel\|>(?:final|analysis|commentary)?|<\|(?:message|return|end|call|constrain)\|>`)
+
+// urlLike matches a domain with an optional path, so dashes can be fixed inside links only.
+var urlLike = regexp.MustCompile(`(?i)(?:https?://)?(?:[a-z0-9\x{2010}\x{2011}\x{2012}\x{2013}-]+\.)+[a-z]{2,}(?:/[^\s\p{Z}<>"'()\[\]*]*)?`)
+
+// urlDashes are the typographic dashes the model types instead of "-", which break a link:
+// "cyclonepods.com/pages/store\u2011locator" (2026-10-21, sent to a customer).
+var urlDashes = strings.NewReplacer("\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-")
+
+// cleanReply removes leaked chat-format markers and fixes dashes inside links, then trims blanks.
+func cleanReply(s string) string {
+	s = harmonyToken.ReplaceAllString(s, "")
+	s = urlLike.ReplaceAllStringFunc(s, urlDashes.Replace)
+	return trimBlank(s)
 }
 
 // resolve runs after the reply is queued so the CSAT survey sent on resolve follows the answer.
@@ -679,6 +698,7 @@ func (m *Manager) PreviewReply(ctx context.Context, assistantID int, message str
 	if err != nil {
 		return "", nil, err
 	}
+	answer = cleanReply(answer)
 	main, confirm := splitConfirmation(strings.TrimSpace(answer))
 	if confirm != "" {
 		main += "\n\n" + confirm

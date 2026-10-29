@@ -91,3 +91,18 @@ func TestTrimBlank(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestCleanReply(t *testing.T) {
+	cases := map[string]string{
+		"<|start|>assistant<|channel|>final**Gust Core Mint is not menthol.**\n\nDid that answer your question?<|return|>": "**Gust Core Mint is not menthol.**\n\nDid that answer your question?",
+		"Use our store locator: **cyclonepods.com/pages/store\u2011locator**.":                                             "Use our store locator: **cyclonepods.com/pages/store-locator**.",
+		"See https://cyclonepods.com/pages/store\u2011locator\u202f\u2013 thanks":                                          "See https://cyclonepods.com/pages/store-locator\u202f\u2013 thanks",
+		"A mint\u2011style flavor, non\u2011ice. Email support@cyclonepods.com.":                                           "A mint\u2011style flavor, non\u2011ice. Email support@cyclonepods.com.",
+		"\u200b": "",
+	}
+	for in, want := range cases {
+		if got := cleanReply(in); got != want {
+			t.Errorf("cleanReply(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
