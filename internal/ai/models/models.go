@@ -269,6 +269,8 @@ type ChatCompletionResult struct {
 	Content   string     `json:"content"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	Usage     TokenUsage `json:"usage"`
+	// FinishReason is the provider's stop reason; "length" means the token cap cut the turn off.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // TokenUsage carries the provider's token accounting for one completion.

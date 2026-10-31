@@ -106,3 +106,15 @@ func TestCleanReply(t *testing.T) {
 		}
 	}
 }
+
+func TestSpecialTokenSurvivesCleanReply(t *testing.T) {
+	if specialToken.MatchString(cleanReply("<|start|>assistant<|channel|>final Thanks!<|return|>")) {
+		t.Fatal("known harmony markers are stripped, not treated as garbled output")
+	}
+	if !specialToken.MatchString(cleanReply("uid Bill and.\"// <|reserved_200016|>--- (.,//.")) {
+		t.Fatal("expected a leftover tokenizer marker to be detected")
+	}
+	if specialToken.MatchString(cleanReply("Use code <b>CYCLONE_10</b> at checkout.")) {
+		t.Fatal("ordinary text flagged as garbled")
+	}
+}

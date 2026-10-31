@@ -133,6 +133,9 @@ func (m *Manager) continueAgentRun(ctx context.Context, run *pendingAgentRun) (m
 		}
 		m.lo.Debug("ai run model response", "step", run.Step, "content_len", len(res.Content), "tool_calls", len(res.ToolCalls), "content", res.Content, "prompt_tokens", res.Usage.PromptTokens, "completion_tokens", res.Usage.CompletionTokens)
 		if len(res.ToolCalls) == 0 {
+			if err := m.truncatedAnswer(res, run.MaxSteps); err != nil {
+				return models.AgentRunResult{}, err
+			}
 			m.lo.Debug("ai run final answer", "answer", res.Content)
 			return completedAgentRun(m.applyIDRepairs(res.Content, run.Messages)), nil
 		}
@@ -157,8 +160,22 @@ func (m *Manager) continueAgentRun(ctx context.Context, run *pendingAgentRun) (m
 		m.lo.Warn("agent produced no answer within the step budget", "max_steps", run.MaxSteps)
 		return models.AgentRunResult{}, envelope.NewError(envelope.GeneralError, m.i18n.T("ai.noAnswerWithinSteps"), nil)
 	}
+	if err := m.truncatedAnswer(res, run.MaxSteps); err != nil {
+		return models.AgentRunResult{}, err
+	}
 	m.lo.Debug("ai run final answer", "answer", res.Content, "forced", true)
 	return completedAgentRun(m.applyIDRepairs(res.Content, run.Messages)), nil
+}
+
+// truncatedAnswer rejects a final answer the token cap cut off. Hitting the cap usually means the
+// model degenerated: gpt-oss once spent all 1024 tokens on a garbled run of symbols and tokenizer
+// markers, and the customer was emailed it (2026-10-31).
+func (m *Manager) truncatedAnswer(res models.ChatCompletionResult, maxSteps int) error {
+	if res.FinishReason != "length" {
+		return nil
+	}
+	m.lo.Warn("agent answer hit the completion token cap, discarding it", "completion_tokens", res.Usage.CompletionTokens, "content_len", len(res.Content), "max_steps", maxSteps)
+	return envelope.NewError(envelope.GeneralError, m.i18n.T("ai.answerTruncated"), nil)
 }
 
 func (m *Manager) processAgentToolCalls(ctx context.Context, run *pendingAgentRun) (*models.AgentRunResult, error) {
