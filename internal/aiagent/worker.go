@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -354,6 +355,11 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	answer, err := m.ai.RunAgentWithTools(runCtx, systemPrompt, history, m.maxSteps, tctx, assistant.ToolIDs, false, false, tools)
 	stopTyping()
 	answer = cleanReply(answer)
+	// A chat-format token left after cleanReply means the output is garbled, not a reply.
+	if err == nil && specialToken.MatchString(answer) {
+		m.lo.Warn("ai agent answer contains model special tokens, discarding it", "conversation_uuid", conv.UUID, "answer", answer)
+		err = errGarbledAnswer
+	}
 	// A human agent may have taken over or resolved the conversation mid-run; if so, drop this
 	// run's reply and status actions instead of talking over them.
 	if fresh, ferr := m.convo.GetConversation(convID, "", ""); ferr == nil {
@@ -474,6 +480,12 @@ func trimBlank(s string) string {
 // harmonyToken matches gpt-oss chat-format markers that sometimes leak into the answer text, e.g.
 // "<|start|>assistant<|channel|>final**The Gust Core…<|return|>" (preview, 2026-10-29).
 var harmonyToken = regexp.MustCompile(`<\|start\|>(?:assistant)?|<\|channel\|>(?:final|analysis|commentary)?|<\|(?:message|return|end|call|constrain)\|>`)
+
+// specialToken matches any <|name|> tokenizer marker still in the answer once cleanReply has removed
+// the known harmony ones, e.g. "<|reserved_200016|>" inside 2.7 KB of degenerate output (2026-10-31).
+var specialToken = regexp.MustCompile(`<\|[A-Za-z0-9_]+\|>`)
+
+var errGarbledAnswer = errors.New("answer contains model special tokens")
 
 // urlLike matches a domain with an optional path, so dashes can be fixed inside links only.
 var urlLike = regexp.MustCompile(`(?i)(?:https?://)?(?:[a-z0-9\x{2010}\x{2011}\x{2012}\x{2013}-]+\.)+[a-z]{2,}(?:/[^\s\p{Z}<>"'()\[\]*]*)?`)

@@ -156,3 +156,31 @@ func (t *approvalTestTool) approvalRequired() bool { return true }
 func (t *approvalTestTool) toolID() int { return 1 }
 
 func (t *approvalTestTool) toolUpdatedAt() time.Time { return time.Unix(1, 0) }
+
+func TestTruncatedFinalAnswerIsRejected(t *testing.T) {
+	m := newTestManager(t)
+	for name, maxSteps := range map[string]int{"in budget": 5, "forced after step budget": 0} {
+		provider := &approvalTestProvider{responses: []models.ChatCompletionResult{
+			{Content: "‐ chap‑ (-enabledand andSU--- <|reserved_200016|>", FinishReason: "length"},
+		}}
+		run := &pendingAgentRun{
+			Scope:    AgentRunScope{AgentID: 7, ConversationID: 9, ConversationUUID: "conversation-1", Surface: models.ToolInvocationCopilot},
+			Client:   provider,
+			MaxSteps: maxSteps,
+		}
+		if result, err := m.continueAgentRun(t.Context(), run); err == nil {
+			t.Fatalf("%s: expected truncated answer to be rejected, got %#v", name, result)
+		}
+	}
+
+	provider := &approvalTestProvider{responses: []models.ChatCompletionResult{{Content: "All set.", FinishReason: "stop"}}}
+	run := &pendingAgentRun{
+		Scope:    AgentRunScope{AgentID: 7, ConversationID: 9, ConversationUUID: "conversation-1", Surface: models.ToolInvocationCopilot},
+		Client:   provider,
+		MaxSteps: 5,
+	}
+	result, err := m.continueAgentRun(t.Context(), run)
+	if err != nil || result.Content != "All set." {
+		t.Fatalf("expected completed answer, got %#v, %v", result, err)
+	}
+}

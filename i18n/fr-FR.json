@@ -574,6 +574,7 @@
   "ai.providerTimeout": "Le fournisseur d'IA a mis trop de temps à répondre. Réessayez, ou essayez une requête plus courte.",
   "ai.emptyResponse": "L'AI a renvoyé une réponse vide. Rien n'a été généré. Réessayez ou reformulez votre demande.",
   "ai.faqAlreadyReviewed": "Cette suggestion a déjà été évaluée.",
+  "ai.answerTruncated": "La réponse de l'IA a été coupée à sa limite de longueur et a donc été ignorée. Réessayez, ou demandez à un administrateur d'augmenter la limite de tokens.",
   "ai.noAnswerWithinSteps": "L'IA a atteint sa limite de nombre d'étapes avant de répondre. Essayez une requête plus simple, ou demandez à un administrateur d'augmenter la limite.",
   "ai.agent.handoffDefault": "L'assistant d'IA a transmis cette conversation à un humain.",
   "ai.agent.handoffMaxTurns": "L'assistant d'IA a atteint sa limite de nombre de réponses pour cette conversation et l'a transmise à un humain.",

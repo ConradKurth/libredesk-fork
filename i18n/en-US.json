@@ -613,6 +613,7 @@
   "ai.agent.needMoreHelp": "No, I need more help",
   "ai.agent.verificationEmailBody": "Your verification code is {code}. It expires in 10 minutes. If you did not request this, you can ignore this email.",
   "ai.agent.verificationEmailSubject": "Your verification code",
+  "ai.answerTruncated": "The AI's answer was cut off at its length limit, so it was discarded. Try again, or ask an admin to raise the max tokens setting.",
   "ai.apiKeyNotSet": "The AI provider API key is not set. Ask your administrator to add it in AI settings.",
   "ai.assistantUnavailable": "The selected assistant is unavailable. It may have been removed or disabled. Pick another assistant or use the default Copilot.",
   "ai.emptyResponse": "The AI returned an empty response. Nothing was generated. Try again, or rephrase your request.",

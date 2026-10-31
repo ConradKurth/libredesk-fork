@@ -66,6 +66,7 @@ type chatCompletionResponse struct {
 			Content   string            `json:"content"`
 			ToolCalls []models.ToolCall `json:"tool_calls"`
 		} `json:"message"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage json.RawMessage `json:"usage"`
 }
@@ -170,11 +171,12 @@ func (o *OpenAIClient) SendChatCompletion(ctx context.Context, payload models.Ch
 			o.lo.Warn("could not parse token usage from provider response", "error", err)
 		}
 	}
-	o.lo.Debug("chat completion response", "model", model, "prompt_tokens", usage.PromptTokens, "completion_tokens", usage.CompletionTokens, "total_tokens", usage.TotalTokens)
+	o.lo.Debug("chat completion response", "model", model, "prompt_tokens", usage.PromptTokens, "completion_tokens", usage.CompletionTokens, "total_tokens", usage.TotalTokens, "finish_reason", parsed.Choices[0].FinishReason)
 	return models.ChatCompletionResult{
-		Content:   parsed.Choices[0].Message.Content,
-		ToolCalls: parsed.Choices[0].Message.ToolCalls,
-		Usage:     usage,
+		Content:      parsed.Choices[0].Message.Content,
+		ToolCalls:    parsed.Choices[0].Message.ToolCalls,
+		Usage:        usage,
+		FinishReason: parsed.Choices[0].FinishReason,
 	}, nil
 }
 
