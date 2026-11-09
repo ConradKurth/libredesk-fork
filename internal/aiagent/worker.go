@@ -354,9 +354,16 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 	stopTyping := m.keepTyping(conv.UUID)
 	answer, err := m.ai.RunAgentWithTools(runCtx, systemPrompt, history, m.maxSteps, tctx, assistant.ToolIDs, false, false, tools)
 	stopTyping()
+	// The model sometimes types the handoff tool's name instead of calling it: "Let me connect you
+	// with a teammate.\n\n[[hand_off_to_human]]" reached a customer in chat (2026-11-09). Honor it.
+	if err == nil && !outcome.handedOff && typedToolNames(answer)[handoffToolName] {
+		m.lo.Warn("ai agent typed the handoff tool instead of calling it, handing off", "conversation_uuid", conv.UUID)
+		outcome.handedOff = true
+		outcome.handoffReason = teammateFollowUpReason
+	}
 	answer = cleanReply(answer)
-	// A chat-format token left after cleanReply means the output is garbled, not a reply.
-	if err == nil && specialToken.MatchString(answer) {
+	// A chat-format token or a tool call left as text after cleanReply means the output is garbled, not a reply.
+	if err == nil && (specialToken.MatchString(answer) || toolCallText.MatchString(answer)) {
 		m.lo.Warn("ai agent answer contains model special tokens, discarding it", "conversation_uuid", conv.UUID, "answer", answer)
 		err = errGarbledAnswer
 	}
@@ -417,7 +424,7 @@ func (m *Manager) handle(ctx context.Context, convID int) {
 		m.lo.Warn("ai agent promised teammate action without handoff, handing off", "conversation_uuid", conv.UUID)
 		reply, _ := splitConfirmation(strings.TrimSpace(answer))
 		reply, _ = splitSuggestions(reply)
-		m.handoffWithReply(conv, assistant, reply, "The assistant told the customer a teammate will follow up. Please pick this up.")
+		m.handoffWithReply(conv, assistant, reply, teammateFollowUpReason)
 		return
 	}
 	// The model's text answer is the reply to the customer. Handoff and resolve are separate tool actions.
@@ -485,7 +492,28 @@ var harmonyToken = regexp.MustCompile(`<\|start\|>(?:assistant)?|<\|channel\|>(?
 // the known harmony ones, e.g. "<|reserved_200016|>" inside 2.7 KB of degenerate output (2026-10-31).
 var specialToken = regexp.MustCompile(`<\|[A-Za-z0-9_]+\|>`)
 
-var errGarbledAnswer = errors.New("answer contains model special tokens")
+// toolCallText matches a harmony tool call left as text once cleanReply has removed the markers,
+// e.g. `to=functions.search_knowledge_base {"query":…}` sent as the whole reply (CYC-1972).
+var toolCallText = regexp.MustCompile(`to=functions\.`)
+
+// typedToolName matches a tool name the model typed in double brackets instead of calling the tool,
+// e.g. "[[hand_off_to_human]]" (2026-11-09).
+var typedToolName = regexp.MustCompile(`\[\[\s*([A-Za-z0-9_]+)\s*\]\]`)
+
+// typedToolNames returns the tool names typed in double brackets in s.
+func typedToolNames(s string) map[string]bool {
+	names := map[string]bool{}
+	for _, m := range typedToolName.FindAllStringSubmatch(s, -1) {
+		names[m[1]] = true
+	}
+	return names
+}
+
+const handoffToolName = "hand_off_to_human"
+
+const teammateFollowUpReason = "The assistant told the customer a teammate will follow up. Please pick this up."
+
+var errGarbledAnswer = errors.New("answer contains model special tokens or tool-call text")
 
 // urlLike matches a domain with an optional path, so dashes can be fixed inside links only.
 var urlLike = regexp.MustCompile(`(?i)(?:https?://)?(?:[a-z0-9\x{2010}\x{2011}\x{2012}\x{2013}-]+\.)+[a-z]{2,}(?:/[^\s\p{Z}<>"'()\[\]*]*)?`)
@@ -494,9 +522,10 @@ var urlLike = regexp.MustCompile(`(?i)(?:https?://)?(?:[a-z0-9\x{2010}\x{2011}\x
 // "cyclonepods.com/pages/store\u2011locator" (2026-10-21, sent to a customer).
 var urlDashes = strings.NewReplacer("\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-")
 
-// cleanReply removes leaked chat-format markers and fixes dashes inside links, then trims blanks.
+// cleanReply removes leaked chat-format markers and typed tool names, and fixes dashes inside links, then trims blanks.
 func cleanReply(s string) string {
 	s = harmonyToken.ReplaceAllString(s, "")
+	s = typedToolName.ReplaceAllString(s, "")
 	s = urlLike.ReplaceAllStringFunc(s, urlDashes.Replace)
 	return trimBlank(s)
 }

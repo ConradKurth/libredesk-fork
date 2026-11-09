@@ -13,7 +13,8 @@ var (
 	weWillFixRe = regexp.MustCompile(`(?i)\bwe(?:['’]ll| will| are going to)\b[^.?!]{0,20}?\b(?:arrange|process|send|ship|issue|refund)\b[^.?!]{0,30}?\b(?:replacement|refund|reship|return label|missing|credit)`)
 	// "I'll have a teammate review your account", "I'm passing this to our support team": the
 	// assistant delegates to a person on our side (prod 2026-10-04, a double charge left with the bot).
-	iWillDelegateRe = regexp.MustCompile(`(?i)\bI(?:(?:['’]ll| will| am going to|['’]m going to)\s+(?:have|get|ask|pass|forward|escalate|flag|refer)|['’]m (?:passing|forwarding|escalating|flagging|referring))\b[^.?!]{0,30}?\b(?:teammates?|team members?|(?:our|the) (?:support |customer care |customer service |billing )?team|a (?:human|person|specialist|representative|rep|support agent))\b`)
+	// "Let me connect you with a teammate" (prod 2026-11-09) delegates the same way.
+	iWillDelegateRe = regexp.MustCompile(`(?i)\b(?:I(?:(?:['’]ll| will| am going to|['’]m going to)\s+(?:have|get|ask|pass|forward|escalate|flag|refer)|['’]m (?:passing|forwarding|escalating|flagging|referring))|let me (?:connect|transfer|pass) you)\b[^.?!]{0,30}?\b(?:teammates?|team members?|(?:our|the) (?:support |customer care |customer service |billing )?team|a (?:human|person|specialist|representative|rep|support agent))\b`)
 	// "Once we have the photo, a teammate will arrange a replacement": a next step that waits on the
 	// customer, said while the assistant is still collecting details.
 	conditionalRe = regexp.MustCompile(`(?i)\b(?:once|if|after|when|whenever|as soon as|then|let (?:us|me) know)\b`)
