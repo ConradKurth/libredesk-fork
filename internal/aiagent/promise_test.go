@@ -15,6 +15,8 @@ func TestClaimsTeammateAction(t *testing.T) {
 		"Thanks for the clarification, Rachel. It looks like a separate order may have been placed in addition to your regular subscription charge. I’ll have a teammate review your account and the recent orders to determine why the extra charge appeared.",
 		"I'll pass this along to our support team so they can sort out the refund.",
 		"I’m escalating this to a specialist now.",
+		// Prod 2026-11-09: sent with a typed "[[hand_off_to_human]]" and no handoff.
+		"I’m sorry I couldn’t help fully. Let me connect you with a teammate who can investigate this further.",
 		"I don’t see a 0 % menthol vape juice in our catalog at the moment, so a teammate will check on any upcoming options for you.",
 	}
 	for _, reply := range claims {

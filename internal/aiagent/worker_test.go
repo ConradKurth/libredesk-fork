@@ -99,6 +99,8 @@ func TestCleanReply(t *testing.T) {
 		"See https://cyclonepods.com/pages/store\u2011locator\u202f\u2013 thanks":                                          "See https://cyclonepods.com/pages/store-locator\u202f\u2013 thanks",
 		"A mint\u2011style flavor, non\u2011ice. Email support@cyclonepods.com.":                                           "A mint\u2011style flavor, non\u2011ice. Email support@cyclonepods.com.",
 		"\u200b": "",
+		"Let me connect you with a teammate.\n\n[[hand_off_to_human]]": "Let me connect you with a teammate.",
+		"[[ hand_off_to_human ]]":                                      "",
 	}
 	for in, want := range cases {
 		if got := cleanReply(in); got != want {
@@ -116,5 +118,23 @@ func TestSpecialTokenSurvivesCleanReply(t *testing.T) {
 	}
 	if specialToken.MatchString(cleanReply("Use code <b>CYCLONE_10</b> at checkout.")) {
 		t.Fatal("ordinary text flagged as garbled")
+	}
+}
+
+func TestTypedToolNames(t *testing.T) {
+	if !typedToolNames("I’ll have a teammate look into it.\n\n[[hand_off_to_human]]\n\nI've passed this on.")[handoffToolName] {
+		t.Fatal("expected the typed handoff tool to be detected")
+	}
+	if typedToolNames("See [the FAQ](https://cyclonepods.com/pages/faq) or [[x]](y).")[handoffToolName] {
+		t.Fatal("ordinary text detected as a handoff")
+	}
+}
+
+func TestToolCallTextSurvivesCleanReply(t *testing.T) {
+	if !toolCallText.MatchString(cleanReply(`<|start|>assistant<|channel|>commentary to=functions.search_knowledge_base {"query":"Lightning menthol"}<|call|>`)) {
+		t.Fatal("expected a tool call left as text to be detected")
+	}
+	if toolCallText.MatchString(cleanReply("Your order ships to=Denver functions fine.")) {
+		t.Fatal("ordinary text flagged as a tool call")
 	}
 }

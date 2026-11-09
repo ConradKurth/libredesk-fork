@@ -132,7 +132,7 @@ type handoffTool struct {
 	outcome   *runOutcome
 }
 
-func (t *handoffTool) Name() string { return "hand_off_to_human" }
+func (t *handoffTool) Name() string { return handoffToolName }
 
 func (t *handoffTool) Description() string {
 	return "Hand the conversation off to a human agent when you cannot help, are unsure, the request is out of scope, or the customer asks for a human."
