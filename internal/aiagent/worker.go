@@ -1042,6 +1042,13 @@ func splitSuggestions(answer string) (string, []string) {
 	if idx := strings.LastIndex(answer, suggestionsMarker); idx != -1 {
 		body = strings.TrimSpace(strings.ReplaceAll(answer[:idx], suggestionsMarker, ""))
 		payload = strings.TrimSpace(answer[idx+len(suggestionsMarker):])
+		// Text after the marker's line (e.g. the email footer) stays in the body.
+		if nl := strings.Index(payload, "\n"); nl != -1 {
+			if rest := strings.TrimSpace(payload[nl+1:]); rest != "" {
+				body = strings.TrimSpace(body + "\n\n" + rest)
+			}
+			payload = strings.TrimSpace(payload[:nl])
+		}
 	} else if body, payload = splitBareSuggestions(answer); payload == "" {
 		return answer, nil
 	}
@@ -1067,27 +1074,47 @@ func splitSuggestions(answer string) (string, []string) {
 // sometimes missing a bracket: ["Yes, that helps","I need more assistance"] or "Yes","No"].
 var bareSuggestionsLine = regexp.MustCompile(`^\[?\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\]?,?$`)
 
-// splitBareSuggestions splits a trailing unmarked options array off answer and returns it as a
-// JSON array; payload is "" when the last line isn't one. Without this the array reaches the customer as text.
+// trailingSuggestionsArray matches an options array the model appended to a sentence instead of
+// putting it on its own line: Did that answer your question? ["Yes, that's helpful","No, I need more help"]
+var trailingSuggestionsArray = regexp.MustCompile(`\s\[\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\],?$`)
+
+// blankLineRun collapses the gap left where an options line was removed.
+var blankLineRun = regexp.MustCompile(`\n[ \t]*\n(?:[ \t]*\n)+`)
+
+// splitBareSuggestions strips unmarked options arrays from answer and returns the last one as a
+// JSON array; payload is "" when there is none. An array can sit on its own line or at the end of
+// a sentence, and above the email footer as well as on the last line (2026-11-10 emails). Without
+// this the array reaches the customer as text.
 func splitBareSuggestions(answer string) (body, payload string) {
-	trimmed := strings.TrimSpace(answer)
-	idx := strings.LastIndex(trimmed, "\n")
-	line := strings.TrimSpace(trimmed[idx+1:])
-	if !bareSuggestionsLine.MatchString(line) || (!strings.HasPrefix(line, "[") && !strings.Contains(line, "]")) {
+	lines := strings.Split(strings.TrimSpace(answer), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		var found string
+		if bareSuggestionsLine.MatchString(line) && (strings.HasPrefix(line, "[") || strings.Contains(line, "]")) {
+			found, lines[i] = line, ""
+			if i > 0 {
+				lines[i-1] = strings.TrimSuffix(strings.TrimRight(lines[i-1], " \t"), ",")
+			}
+		} else if loc := trailingSuggestionsArray.FindStringIndex(line); loc != nil {
+			found, lines[i] = strings.TrimSpace(line[loc[0]:]), strings.TrimSpace(line[:loc[0]])
+		} else {
+			continue
+		}
+		if payload == "" {
+			payload = strings.TrimSuffix(found, ",")
+		}
+	}
+	if payload == "" {
 		return answer, ""
 	}
-	payload = strings.TrimSuffix(line, ",")
 	if !strings.HasPrefix(payload, "[") {
 		payload = "[" + payload
 	}
 	if !strings.HasSuffix(payload, "]") {
 		payload += "]"
 	}
-	body = ""
-	if idx != -1 {
-		body = strings.TrimSpace(trimmed[:idx])
-	}
-	return strings.TrimSuffix(body, ","), payload
+	body = blankLineRun.ReplaceAllString(strings.Join(lines, "\n"), "\n\n")
+	return strings.TrimSuffix(strings.TrimSpace(body), ","), payload
 }
 
 // closingWords may make up a closing acknowledgement; closingSignals must appear in one, so a bare
