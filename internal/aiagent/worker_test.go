@@ -16,6 +16,13 @@ func TestSplitSuggestions(t *testing.T) {
 	}
 }
 
+func TestSplitSuggestionsKeepsTextAfterMarker(t *testing.T) {
+	body, suggestions := splitSuggestions("Which device?\n[[suggestions]] [\"Gust Core\",\"Lightning\"]\n\nPlease reply to this email.")
+	if body != "Which device?\n\nPlease reply to this email." || len(suggestions) != 2 {
+		t.Fatalf("unexpected result: %q %#v", body, suggestions)
+	}
+}
+
 func TestSplitSuggestionsRejectsInvalidPayload(t *testing.T) {
 	body, suggestions := splitSuggestions("Tell me more\n[[suggestions]] not-json")
 	if body != "Tell me more" || suggestions != nil {
@@ -30,6 +37,12 @@ func TestSplitSuggestionsBareArray(t *testing.T) {
 		// Opening bracket lost (widget, CYC-1689).
 		{"\"Yes, thanks\",\"No, I need more help\"]", ""},
 		{"Did that resolve your question?,\n[\"Yes\",\"No\"]", "Did that resolve your question?"},
+		// Appended to the question, after the footer (email, 2026-11-10, CYC-2415).
+		{"Opened pods can't be returned.\n\nPlease reply to this email.\n\nDid that answer your question? [\"Yes, that's helpful\",\"No, I need more help\"]",
+			"Opened pods can't be returned.\n\nPlease reply to this email.\n\nDid that answer your question?"},
+		// On its own line above the footer.
+		{"Which device are you using?\n\n [\"Gust Core\",\"Lightning\"]  \n\nPlease reply to this email.",
+			"Which device are you using?\n\nPlease reply to this email."},
 	}
 	for _, c := range cases {
 		body, suggestions := splitSuggestions(c.in)
@@ -44,6 +57,7 @@ func TestSplitSuggestionsKeepsOrdinaryText(t *testing.T) {
 		"Your order shipped.",
 		"The label reads \"Mint\", \"Lush Ice\" on the side.",
 		"Pick one:\n\"Mint\"",
+		"Choose \"Mint\" or \"Lush Ice\" at checkout.",
 	} {
 		if body, suggestions := splitSuggestions(in); body != in || suggestions != nil {
 			t.Fatalf("%q: got body %q suggestions %#v", in, body, suggestions)
