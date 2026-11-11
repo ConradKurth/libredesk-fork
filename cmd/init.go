@@ -702,6 +702,7 @@ func initNotifier() *notifier.Service {
 
 // initEmailInbox loads inbox config from DB and initializes the email inbox.
 func initEmailInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore, mgr *inbox.Manager, authStatusHook email.AuthStatusCallback) (inbox.Inbox, error) {
+	lo := initLogger("email_inbox")
 	var config imodels.Config
 
 	// Load JSON data into Koanf.
@@ -714,11 +715,11 @@ func initEmailInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrS
 	}
 
 	if len(config.SMTP) == 0 {
-		log.Printf("WARNING: Zero SMTP servers configured for `%s` inbox: Name: `%s`", inboxRecord.Channel, inboxRecord.Name)
+		lo.Warn("no SMTP servers configured for inbox", "inbox_id", inboxRecord.ID, "channel", inboxRecord.Channel)
 	}
 
 	if len(config.IMAP) == 0 {
-		log.Printf("WARNING: Zero IMAP clients configured for `%s` inbox: Name: `%s`", inboxRecord.Channel, inboxRecord.Name)
+		lo.Warn("no IMAP clients configured for inbox", "inbox_id", inboxRecord.ID, "channel", inboxRecord.Channel)
 	}
 
 	config.From = inboxRecord.From
@@ -733,40 +734,48 @@ func initEmailInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrS
 		// Marshal updated config to JSON
 		updatedConfigJSON, err := json.Marshal(updatedConfig)
 		if err != nil {
-			log.Printf("ERROR: Failed to marshal updated config during token refresh for inbox %d: %v", inboxID, err)
+			lo.Error("error encoding refreshed inbox tokens", "inbox_id", inboxID, "error", err)
 			return err
 		}
 
 		// Persist updated config to DB
 		if err := mgr.UpdateConfig(inboxID, updatedConfigJSON); err != nil {
-			log.Printf("ERROR: Failed to persist refreshed tokens during operation for inbox %d: %v", inboxID, err)
 			return err
 		}
 
-		log.Printf("INFO: Successfully persisted refreshed tokens during operation for inbox: %d", inboxID)
+		lo.Info("inbox tokens refreshed", "inbox_id", inboxID)
 		return nil
 	}
 
 	inbox, err := email.New(msgStore, usrStore, email.Opts{
 		ID:                   inboxRecord.ID,
+		UUID:                 inboxRecord.UUID,
 		Name:                 inboxRecord.Name,
+		Aliases:              inboxRecord.Aliases,
 		Config:               config,
-		Lo:                   initLogger("email_inbox"),
+		Lo:                   lo,
 		TokenRefreshCallback: tokenRefreshCallback,
 		AuthStatusCallback:   authStatusHook,
+		AliasVerificationCallback: func(ctx context.Context, token, from string) error {
+			return mgr.CompleteAliasVerification(ctx, inboxRecord.ID, token, from)
+		},
+		AliasExpiryCallback: func(ctx context.Context, startedBefore time.Time) error {
+			return mgr.ExpireAliasVerifications(ctx, inboxRecord.ID, startedBefore)
+		},
 	})
 
 	if err != nil {
 		return nil, fmt.Errorf("initializing `%s` inbox: `%s` error : %w", inboxRecord.Channel, inboxRecord.Name, err)
 	}
 
-	log.Printf("`%s` inbox successfully initialized", inboxRecord.Name)
+	lo.Info("inbox initialized", "inbox_id", inboxRecord.ID, "channel", inboxRecord.Channel)
 
 	return inbox, nil
 }
 
 // initLiveChatInbox initializes the live chat inbox.
 func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, usrStore inbox.UserStore, signAvatarURL func(*null.String), relay *livechat.Relay) (inbox.Inbox, error) {
+	lo := initLogger("livechat_inbox")
 	var config livechat.Config
 
 	// Load JSON data into Koanf.
@@ -782,7 +791,7 @@ func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, u
 		ID:            inboxRecord.ID,
 		Name:          inboxRecord.Name,
 		Config:        config,
-		Lo:            initLogger("livechat_inbox"),
+		Lo:            lo,
 		SignAvatarURL: signAvatarURL,
 		Relay:         relay,
 	})
@@ -791,13 +800,14 @@ func initLiveChatInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, u
 		return nil, fmt.Errorf("initializing `%s` inbox: `%s` error : %w", inboxRecord.Channel, inboxRecord.Name, err)
 	}
 
-	log.Printf("`%s` inbox successfully initialized", inboxRecord.Name)
+	lo.Info("inbox initialized", "inbox_id", inboxRecord.ID, "channel", inboxRecord.Channel)
 
 	return inbox, nil
 }
 
 // initWhatsAppInbox initializes a WhatsApp Cloud API inbox.
 func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, client *whatsappapi.Client, sourceUpdater whatsappChannel.SourceIDUpdater) (inbox.Inbox, error) {
+	lo := initLogger("whatsapp_inbox")
 	var config whatsappChannel.Config
 	if err := json.Unmarshal(inboxRecord.Config, &config); err != nil {
 		return nil, fmt.Errorf("unmarshalling whatsapp config for inbox %q: %w", inboxRecord.Name, err)
@@ -808,14 +818,14 @@ func initWhatsAppInbox(inboxRecord imodels.Inbox, msgStore inbox.MessageStore, c
 		Name:          inboxRecord.Name,
 		Config:        config,
 		Client:        client,
-		Lo:            initLogger("whatsapp_inbox"),
+		Lo:            lo,
 		SourceUpdater: sourceUpdater,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initializing `%s` inbox: `%s` error: %w", inboxRecord.Channel, inboxRecord.Name, err)
 	}
 
-	log.Printf("`%s` inbox successfully initialized", inboxRecord.Name)
+	lo.Info("inbox initialized", "inbox_id", inboxRecord.ID, "channel", inboxRecord.Channel)
 	return inb, nil
 }
 
@@ -1018,12 +1028,13 @@ func initOIDC(db *sqlx.DB, settings *setting.Manager, i18n *i18n.I18n) *oidc.Man
 
 // initI18n inits i18n.
 func initI18n(fs stuffbin.FileSystem) *i18n.I18n {
+	lo := initLogger("i18n")
 	lang := cmp.Or(ko.String("app.lang"), defLang)
 	log.Printf("loading i18n language file: %s", lang)
 	if _, err := fs.Read("/i18n/" + lang + ".json"); err != nil {
 		log.Fatalf("error reading i18n language file `%s` : %v", lang, err)
 	}
-	i18n, err := loadI18nLang(lang, fs)
+	i18n, err := loadI18nLang(lang, fs, lo)
 	if err != nil {
 		log.Fatalf("error initializing i18n: %v", err)
 	}
@@ -1294,9 +1305,10 @@ func initImporter(i18n *i18n.I18n) *importer.Importer {
 	})
 }
 
-func initNotificationEmailQueue(db *sqlx.DB, outbound *notifier.Service) *notifier.EmailQueue {
+func initNotificationEmailQueue(db *sqlx.DB, outbound *notifier.Service, checker notifier.DeliveryChecker) *notifier.EmailQueue {
 	q, err := notifier.NewEmailQueue(notifier.EmailQueueOpts{
 		DB:       db,
+		Checker:  checker,
 		Outbound: outbound,
 		Lo:       initLogger("notification-email-queue"),
 	})
@@ -1306,7 +1318,11 @@ func initNotificationEmailQueue(db *sqlx.DB, outbound *notifier.Service) *notifi
 	return q
 }
 
-func initPushNotification(db *sqlx.DB, settings *setting.Manager, i18n *i18n.I18n) *notifier.PushManager {
+func initReplyDeliveryChecker(notifications *notifier.UserNotificationManager, agents *user.Manager, prefs *notifier.PreferenceManager) *notifier.ReplyDeliveryChecker {
+	return notifier.NewReplyDeliveryChecker(notifications, agents, prefs)
+}
+
+func initPushNotification(db *sqlx.DB, settings *setting.Manager, i18n *i18n.I18n, checker notifier.DeliveryChecker) *notifier.PushManager {
 	m, err := notifier.NewPushManager(notifier.PushManagerOpts{
 		DB:          db,
 		Settings:    settings,
@@ -1315,6 +1331,7 @@ func initPushNotification(db *sqlx.DB, settings *setting.Manager, i18n *i18n.I18
 		RootURL:     ko.String("app.root_url"),
 		Concurrency: ko.MustInt("notification.concurrency"),
 		QueueSize:   ko.MustInt("notification.queue_size"),
+		Checker:     checker,
 	})
 	if err != nil {
 		log.Fatalf("error initializing push notification manager: %v", err)
@@ -1378,7 +1395,7 @@ func getLogLevel(lvl string) logf.Level {
 // initRateLimit initializes the rate limiter with default rules.
 // Defaults are used unless overridden in config.toml under [rate_limit.<name>].
 func initRateLimit(redisClient *redis.Client) *ratelimit.Limiter {
-	limiter := ratelimit.New(redisClient)
+	limiter := ratelimit.New(redisClient, initLogger("rate_limit"))
 
 	defaults := []struct {
 		Name string

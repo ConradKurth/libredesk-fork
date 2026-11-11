@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"mime"
 	"net/http"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/abhinavxd/libredesk/internal/envelope"
 	"github.com/abhinavxd/libredesk/internal/ws"
@@ -22,10 +24,10 @@ const (
 // initHandlers initializes the HTTP routes and handlers for the application.
 func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	// Authentication.
-	g.POST("/api/v1/auth/login", rateLimit(handleLogin, "auth"))
-	g.GET("/logout", auth(handleLogout))
+	g.POST("/api/v1/auth/login", rateLimit(sessionLogin(handleLogin), "auth"))
+	g.POST("/api/v1/auth/logout", auth(handleLogout))
 	g.GET("/api/v1/oidc/{id}/login", rateLimit(handleOIDCLogin, "auth"))
-	g.GET("/api/v1/oidc/{id}/finish", rateLimit(handleOIDCCallback, "auth"))
+	g.GET("/api/v1/oidc/{id}/finish", rateLimit(sessionLogin(handleOIDCCallback), "auth"))
 
 	// i18n.
 	g.GET("/api/v1/lang", handleGetAvailableLanguages)
@@ -145,14 +147,14 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.GET("/api/v1/agents", perm(handleGetAgents, "users:manage"))
 	g.GET("/api/v1/agents/{id}", perm(handleGetAgent, "users:manage"))
 	g.POST("/api/v1/agents", perm(handleCreateAgent, "users:manage"))
-	g.PUT("/api/v1/agents/{id}", perm(clearsHCCache(handleUpdateAgent), "users:manage"))
-	g.DELETE("/api/v1/agents/{id}", perm(clearsHCCache(handleDeleteAgent), "users:manage"))
+	g.PUT("/api/v1/agents/{id}", perm(clearsHCCache(sessionChange(handleUpdateAgent)), "users:manage"))
+	g.DELETE("/api/v1/agents/{id}", perm(clearsHCCache(sessionChange(handleDeleteAgent)), "users:manage"))
 	g.POST("/api/v1/agents/import", perm(clearsHCCache(handleImportAgents), "users:manage"))
 	g.GET("/api/v1/agents/import/status", perm(handleGetAgentImportStatus, "users:manage"))
 	g.POST("/api/v1/agents/{id}/api-key", perm(handleGenerateAPIKey, "users:manage"))
 	g.DELETE("/api/v1/agents/{id}/api-key", perm(handleRevokeAPIKey, "users:manage"))
 	g.POST("/api/v1/agents/reset-password", rateLimit(tryAuth(handleResetPassword), "auth"))
-	g.POST("/api/v1/agents/set-password", rateLimit(tryAuth(handleSetPassword), "auth"))
+	g.POST("/api/v1/agents/set-password", rateLimit(tryAuth(sessionChange(handleSetPassword)), "auth"))
 
 	// Contacts.
 	g.GET("/api/v1/contacts", perm(handleGetContacts, "contacts:read_all"))
@@ -194,6 +196,7 @@ func initHandlers(g *fastglue.Fastglue, hub *ws.Hub) {
 	g.PUT("/api/v1/inboxes/{id}/toggle", perm(handleToggleInbox, "inboxes:manage"))
 	g.PUT("/api/v1/inboxes/{id}", perm(handleUpdateInbox, "inboxes:manage"))
 	g.DELETE("/api/v1/inboxes/{id}", perm(handleDeleteInbox, "inboxes:manage"))
+	g.POST("/api/v1/inboxes/{id}/aliases/verify", perm(handleVerifySendForInboxAlias, "inboxes:manage"))
 
 	// OAuth endpoints for email inboxes.
 	g.POST("/api/v1/inboxes/oauth/{provider}/authorize", perm(handleOAuthAuthorize, "inboxes:manage"))
@@ -465,6 +468,9 @@ func serveIndexPage(r *fastglue.Request) error {
 	r.RequestCtx.Response.Header.Add("Pragma", "no-cache")
 	r.RequestCtx.Response.Header.Add("Expires", "-1")
 
+	r.RequestCtx.Response.Header.Set("Content-Security-Policy", "frame-ancestors 'self'")
+	r.RequestCtx.Response.Header.Set("X-Frame-Options", "SAMEORIGIN")
+
 	// Serve the index.html file from the embedded filesystem.
 	file, err := app.fs.Get(path.Join(frontendDir, "index.html"))
 	if err != nil {
@@ -681,7 +687,18 @@ func sendErrorEnvelope(r *fastglue.Request, err error) error {
 	return r.SendErrorEnvelope(e.Code, e.Error(), e.Data, fastglue.ErrorType(e.ErrorType))
 }
 
-// handleHealthCheck handles the health check endpoint.
+// healthCheckTimeout bounds the database ping, so a hung connection fails the check instead of stalling it.
+const healthCheckTimeout = 3 * time.Second
+
+// handleHealthCheck handles the health check endpoint. It reports healthy only while the database answers.
 func handleHealthCheck(r *fastglue.Request) error {
+	app := r.Context.(*App)
+
+	ctx, cancel := context.WithTimeout(context.Background(), healthCheckTimeout)
+	defer cancel()
+	if err := app.db.PingContext(ctx); err != nil {
+		app.lo.Error("health check: database unreachable", "error", err)
+		return r.SendErrorEnvelope(fasthttp.StatusServiceUnavailable, "database unreachable", nil, envelope.GeneralError)
+	}
 	return r.SendEnvelope(true)
 }

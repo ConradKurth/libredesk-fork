@@ -46,12 +46,12 @@ var sendableTemplateHeaderTypes = []string{"", "NONE", "TEXT"}
 var templatePlaceholderPattern = regexp.MustCompile(`\{\{[A-Za-z0-9_]+\}\}`)
 
 // WhatsAppReadReceiptTarget returns the inbox ID and wamid of the latest unseen inbound message, or empty values when there is nothing to mark read.
-func (m *Manager) WhatsAppReadReceiptTarget(uuid string, userID int) (int, string, error) {
+func (m *Manager) WhatsAppReadReceiptTarget(uuid string, userID int, messageUUID string) (int, string, error) {
 	var row struct {
 		SourceID string `db:"source_id"`
 		InboxID  int    `db:"inbox_id"`
 	}
-	if err := m.q.GetWhatsAppReadReceiptTarget.Get(&row, uuid, userID); err != nil {
+	if err := m.q.GetWhatsAppReadReceiptTarget.Get(&row, uuid, userID, messageUUID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, "", nil
 		}
@@ -60,7 +60,7 @@ func (m *Manager) WhatsAppReadReceiptTarget(uuid string, userID int) (int, strin
 	return row.InboxID, row.SourceID, nil
 }
 
-func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.Time, errorMsg string) error {
+func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.Time, errorMsg string, errorCode int) error {
 	if sourceID == "" || metaStatus == "" {
 		return nil
 	}
@@ -109,6 +109,9 @@ func (m *Manager) ApplyWhatsAppStatus(sourceID, metaStatus string, eventAt time.
 		}
 		m.lo.Error("error applying whatsapp message status", "source_id", sourceID, "error", err)
 		return err
+	}
+	if metaStatus == WhatsAppStatusFailed {
+		m.lo.Error("whatsapp message delivery failed", "conversation_uuid", row.ConversationUUID, "message_uuid", row.UUID, "source_id", sourceID, "provider_status", metaStatus, "provider_error_code", errorCode)
 	}
 	m.BroadcastMessageUpdate(row.ConversationUUID, row.UUID, map[string]any{"status": row.Status, "meta": stripCSATUUID(row.Meta)})
 	return nil
@@ -161,7 +164,7 @@ func (m *Manager) sendWhatsAppCSAT(actorUserID int, conversation models.Conversa
 		if err == nil {
 			meta["whatsapp_template_id"] = t.ID
 			meta["whatsapp_template_params"] = map[string]string{"button_url_0": csatUUID}
-			if _, err := m.QueueReply(nil, conversation.InboxID, actorUserID, conversation.ContactID, conversation.UUID, "", nil, nil, nil, meta); err != nil {
+			if _, err := m.QueueReply(nil, conversation.InboxID, actorUserID, conversation.ContactID, conversation.UUID, "", nil, nil, nil, "" /** sendFrom **/, meta); err != nil {
 				m.lo.Error("error sending whatsapp CSAT template", "conversation_uuid", conversation.UUID, "error", err)
 				return envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 			}
@@ -176,7 +179,7 @@ func (m *Manager) sendWhatsAppCSAT(actorUserID int, conversation models.Conversa
 				content = tmpl.BodyContent + "\n" + csatURL
 			}
 		}
-		if _, err := m.QueueReply(nil, conversation.InboxID, actorUserID, conversation.ContactID, conversation.UUID, content, nil, nil, nil, meta); err != nil {
+		if _, err := m.QueueReply(nil, conversation.InboxID, actorUserID, conversation.ContactID, conversation.UUID, content, nil, nil, nil, "" /** sendFrom **/, meta); err != nil {
 			m.lo.Error("error sending whatsapp CSAT link", "conversation_uuid", conversation.UUID, "error", err)
 			return envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 		}

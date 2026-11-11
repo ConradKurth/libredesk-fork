@@ -127,6 +127,22 @@ CREATE TABLE inboxes (
 	CONSTRAINT constraint_inboxes_on_name CHECK (length("name") <= 140)
 );
 
+DROP TABLE IF EXISTS inbox_email_addresses CASCADE;
+CREATE TABLE inbox_email_addresses (
+	id SERIAL PRIMARY KEY,
+	inbox_id INTEGER NOT NULL REFERENCES inboxes(id) ON DELETE CASCADE,
+	email TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	position INTEGER NOT NULL DEFAULT 0,
+	verification_status TEXT NOT NULL DEFAULT 'not_verified',
+	verification_token TEXT NULL,
+	verification_started_at TIMESTAMPTZ NULL,
+	verified_at TIMESTAMPTZ NULL,
+	CONSTRAINT constraint_inbox_email_addresses_on_kind CHECK (kind IN ('primary', 'alias'))
+);
+CREATE UNIQUE INDEX index_unique_inbox_email_addresses_on_inbox_email ON inbox_email_addresses (inbox_id, LOWER(email));
+CREATE UNIQUE INDEX index_unique_inbox_email_addresses_on_primary ON inbox_email_addresses (inbox_id) WHERE kind = 'primary';
+
 DROP TABLE IF EXISTS teams CASCADE;
 CREATE TABLE teams (
 	id SERIAL PRIMARY KEY,
@@ -378,7 +394,7 @@ CREATE TABLE macros (
    team_id BIGINT REFERENCES teams(id) ON DELETE CASCADE ON UPDATE CASCADE,
    usage_count INT DEFAULT 0 NOT NULL,
    CONSTRAINT name_length CHECK (length(name) <= 140),
-   CONSTRAINT message_content_length CHECK (length(message_content) <= 5000)
+   CONSTRAINT message_content_length CHECK (length(message_content) <= 100000)
 );
 
 DROP TABLE IF EXISTS conversation_participants CASCADE;
@@ -437,11 +453,13 @@ CREATE TABLE media (
 	"size" INT NULL,
 	meta jsonb DEFAULT '{}'::jsonb NOT NULL,
 	private BOOLEAN NOT NULL DEFAULT true,
+	uploaded_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
 	CONSTRAINT constraint_media_on_filename CHECK (length(filename) <= 1000),
 	CONSTRAINT constraint_media_on_content_id CHECK (length(content_id) <= 300)
 );
 CREATE INDEX index_media_on_model_type_and_model_id ON media(model_type, model_id);
 CREATE INDEX index_media_on_content_id ON media(content_id);
+CREATE INDEX index_media_on_uploaded_by ON media(uploaded_by) WHERE uploaded_by IS NOT NULL;
 
 DROP TABLE IF EXISTS oidc CASCADE;
 CREATE TABLE oidc (
@@ -835,6 +853,7 @@ CREATE TABLE ai_assistants (
 	fallback_team_id INTEGER NULL REFERENCES teams(id) ON DELETE SET NULL,
 	handoff_enabled BOOLEAN NOT NULL DEFAULT true,
 	handoff_message TEXT NOT NULL DEFAULT '',
+	citations_enabled BOOLEAN NOT NULL DEFAULT false,
 	languages TEXT[] NOT NULL DEFAULT '{}',
 	enabled BOOLEAN NOT NULL DEFAULT true,
 	CONSTRAINT constraint_ai_assistants_on_tone CHECK (tone IN ('friendly', 'professional', 'neutral', 'casual')),
@@ -1042,6 +1061,7 @@ CREATE TABLE notification_email_queue (
 	notification_id BIGINT REFERENCES user_notifications(id) ON DELETE CASCADE ON UPDATE CASCADE,
 	notification_type user_notification_type NOT NULL,
 	conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE ON UPDATE CASCADE,
+	message_id BIGINT REFERENCES conversation_messages(id) ON DELETE CASCADE ON UPDATE CASCADE,
 	recipient_email TEXT NOT NULL,
 	subject TEXT NOT NULL,
 	content TEXT NOT NULL,
@@ -1156,6 +1176,8 @@ VALUES
 INSERT INTO templates
 ("type", body, is_default, "name", subject, is_builtin)
 VALUES('email_notification'::template_type, '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>A new conversation has been assigned to you:</p>
 
 <div>
@@ -1177,6 +1199,8 @@ VALUES('email_notification'::template_type, '
 INSERT INTO templates
 ("type", body, is_default, "name", subject, is_builtin)
 VALUES('email_notification'::template_type, '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>{{ .Author.FullName }} replied to a conversation assigned to you:</p>
 
 <div>
@@ -1202,6 +1226,8 @@ VALUES('email_notification'::template_type, '
 INSERT INTO templates
 ("type", body, is_default, "name", subject, is_builtin)
 VALUES('email_notification'::template_type, '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>{{ .Author.FullName }} replied to a conversation you are participating in:</p>
 
 <div>
@@ -1227,6 +1253,8 @@ VALUES('email_notification'::template_type, '
 INSERT INTO templates
 ("type", body, is_default, "name", subject, is_builtin)
 VALUES('email_notification'::template_type, '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>{{ .Author.FullName }} replied and reopened a conversation assigned to you:</p>
 
 <div>
@@ -1254,6 +1282,7 @@ INSERT INTO templates
 VALUES (
   'email_notification'::template_type,
   '
+<p>Hi {{ .Recipient.FirstName }},</p>
 
 <p>This is a notification that the SLA for conversation {{ .Conversation.ReferenceNumber }} is approaching the SLA deadline for {{ .SLA.Metric }}.</p>
 
@@ -1286,6 +1315,8 @@ INSERT INTO templates
 VALUES (
   'email_notification'::template_type,
   '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>This is an urgent alert that the SLA for conversation {{ .Conversation.ReferenceNumber }} has been breached for {{ .SLA.Metric }}. Please take immediate action.</p>
 
 <p>
@@ -1317,6 +1348,8 @@ INSERT INTO templates
 VALUES (
   'email_notification'::template_type,
   '
+<p>Hi {{ .Recipient.FirstName }},</p>
+
 <p>{{ .MentionedBy.FullName }} mentioned you in a private note on conversation #{{ .Conversation.ReferenceNumber }}.</p>
 
 <blockquote style="background-color: #f5f5f5; padding: 12px; margin: 16px 0; border-left: 4px solid #ddd;">

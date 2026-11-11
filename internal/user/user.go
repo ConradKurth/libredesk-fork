@@ -159,12 +159,16 @@ func (u *Manager) VerifyPassword(email string, password []byte) (models.User, er
 	var user models.User
 	if err := u.q.GetUser.Get(&user, 0, email, pq.Array([]string{models.UserTypeAgent})); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			u.lo.Warn("password login rejected: invalid credentials")
 			return user, envelope.NewError(envelope.InputError, u.i18n.T("user.invalidEmailPassword"), nil)
 		}
 		u.lo.Error("error fetching user from db", "error", err)
 		return user, envelope.NewError(envelope.GeneralError, u.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 	if err := u.verifyPassword(password, user.Password.String); err != nil {
+		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+			u.lo.Warn("password login rejected: invalid credentials", "user_id", user.ID)
+		}
 		return user, envelope.NewError(envelope.InputError, u.i18n.T("user.invalidEmailPassword"), nil)
 	}
 	return user, nil
@@ -465,6 +469,7 @@ func (u *Manager) ValidateAPIKey(apiKey, apiSecret string) (models.User, error) 
 		if err == sql.ErrNoRows {
 			return user, envelope.NewError(envelope.UnauthorizedError, u.i18n.T("validation.invalidCredential"), nil)
 		}
+		u.lo.Error("error looking up API key user", "error", err)
 		return user, envelope.NewError(envelope.GeneralError, u.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 
@@ -518,19 +523,19 @@ func (u *Manager) GetUserIDsByRole(roleID int) ([]int, error) {
 }
 
 // ChangeSystemUserPassword updates the system user's password with a newly prompted one.
-func ChangeSystemUserPassword(ctx context.Context, db *sqlx.DB) error {
+func ChangeSystemUserPassword(ctx context.Context, db *sqlx.DB) (int, error) {
 	// Prompt for password and get hashed password
 	hashedPassword, err := promptAndHashPassword(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	// Update system user's password in the database.
-	if err := updateSystemUserPassword(db, hashedPassword); err != nil {
-		return fmt.Errorf("error updating system user password: %v", err)
+	id, err := updateSystemUserPassword(db, hashedPassword)
+	if err != nil {
+		return 0, fmt.Errorf("error updating system user password: %v", err)
 	}
-	fmt.Println("password updated successfully. Login with email 'System' and the new password.")
-	return nil
+	return id, nil
 }
 
 // CreateSystemUser creates a system user with the provided password or a random one.
@@ -611,12 +616,13 @@ func promptAndHashPassword(ctx context.Context) ([]byte, error) {
 }
 
 // updateSystemUserPassword updates the password of the system user in the database.
-func updateSystemUserPassword(db *sqlx.DB, hashedPassword []byte) error {
-	_, err := db.Exec(`UPDATE users SET password = $1 WHERE email = $2`, hashedPassword, models.SystemUserEmail)
+func updateSystemUserPassword(db *sqlx.DB, hashedPassword []byte) (int, error) {
+	var id int
+	err := db.Get(&id, `UPDATE users SET password = $1 WHERE email = $2 RETURNING id`, hashedPassword, models.SystemUserEmail)
 	if err != nil {
-		return fmt.Errorf("failed to update system user password: %v", err)
+		return 0, fmt.Errorf("failed to update system user password: %v", err)
 	}
-	return nil
+	return id, nil
 }
 
 // makeUserListQuery generates a query to fetch users based on the provided filters.
@@ -637,7 +643,9 @@ func (u *Manager) makeUserListQuery(page, pageSize int, userTypes []string, orde
 // verifyPassword compares the provided password with the stored password hash.
 func (u *Manager) verifyPassword(pwd []byte, pwdHash string) error {
 	if err := bcrypt.CompareHashAndPassword([]byte(pwdHash), pwd); err != nil {
-		u.lo.Error("error verifying password", "error", err)
+		if !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+			u.lo.Error("error verifying password", "error", err)
+		}
 		return fmt.Errorf("error verifying password: %w", err)
 	}
 	return nil
