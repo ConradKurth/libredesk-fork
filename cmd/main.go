@@ -60,6 +60,7 @@ import (
 	whatsappapi "github.com/abhinavxd/libredesk/internal/whatsapp"
 	whatsappTemplate "github.com/abhinavxd/libredesk/internal/whatsapp/template"
 	"github.com/abhinavxd/libredesk/internal/ws"
+	"github.com/jmoiron/sqlx"
 	"github.com/knadh/go-i18n"
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/stuffbin"
@@ -122,6 +123,7 @@ type App struct {
 	fs                 stuffbin.FileSystem
 	consts             atomic.Value
 	auth               *auth_.Auth
+	sessionsMu         sync.RWMutex
 	authz              *authz.Enforcer
 	i18n               *i18n.I18n
 	lo                 *logf.Logger
@@ -158,6 +160,7 @@ type App struct {
 	contextLink        *contextlink.Manager
 	rateLimit          *ratelimit.Limiter
 	redis              *redis.Client
+	db                 *sqlx.DB
 	fc                 *fastcache.FastCache
 	importer           *importer.Importer
 	whatsappTemplate   *whatsappTemplate.Manager
@@ -242,7 +245,7 @@ func main() {
 
 	validateConfig(ko)
 
-	startPprof()
+	startPprof(initLogger("pprof"))
 
 	// Fallback for config typo. Logs a warning but continues to work with the incorrect key.
 	// Uses 'message.message_outgoing_scan_interval' (correct key) as default key, falls back to the common typo.
@@ -272,7 +275,6 @@ func main() {
 		status                      = initStatus(db, i18n)
 		priority                    = initPriority(db, i18n)
 		ssrfControl                 = initSSRFControl()
-		auth                        = initAuth(oidc, rdb, i18n, ssrfControl)
 		template                    = initTemplate(db, fs, constants, i18n)
 		media                       = initMedia(db, i18n, settings)
 		inbox                       = initInbox(db, i18n)
@@ -280,12 +282,14 @@ func main() {
 		businessHours               = initBusinessHours(db, i18n)
 		webhook                     = initWebhook(db, i18n, ssrfControl)
 		user                        = initUser(i18n, db)
+		auth                        = initAuth(oidc, rdb, i18n, ssrfControl)
 		wsHub                       = initWS(user)
 		notifier                    = initNotifier()
 		userNotification            = initUserNotification(db, i18n)
 		notificationPreference      = initNotificationPreference(db, i18n)
-		pushNotification            = initPushNotification(db, settings, i18n)
-		notificationEmailQueue      = initNotificationEmailQueue(db, notifier)
+		replyDeliveryChecker        = initReplyDeliveryChecker(userNotification, user, notificationPreference)
+		pushNotification            = initPushNotification(db, settings, i18n, replyDeliveryChecker)
+		notificationEmailQueue      = initNotificationEmailQueue(db, notifier, replyDeliveryChecker)
 		notifDispatcher             = initNotifDispatcher(userNotification, notificationPreference, pushNotification, notificationEmailQueue, wsHub, ko.Bool("notification.email.enabled"))
 		automation                  = initAutomationEngine(db, i18n)
 		ai                          = initAI(ctx, db, i18n, ssrfControl)
@@ -313,6 +317,7 @@ func main() {
 	waClient := initWhatsAppClient()
 	waTemplates := initWhatsAppTemplates(db, i18n, waClient, inbox)
 	conversation.SetWhatsAppTemplateStore(waTemplates)
+	conversation.SetArticleReferenceStore(helpCenter)
 
 	// Worker pools that process work produced on this instance. They run on
 	// every replica: each task is enqueued and consumed within the same process,
@@ -364,6 +369,7 @@ func main() {
 		proactive:        initProactive(db, i18n),
 		rateLimit:        rateLimiter,
 		redis:            rdb,
+		db:               db,
 		fc:               initFastCache(rdb),
 		userNotification: userNotification,
 		whatsappClient:   waClient,
@@ -406,12 +412,12 @@ func main() {
 	}
 
 	go func() {
-		colorlog.Green("Server started at %s", ko.String("app.server.address"))
+		lo.Info("server starting", "address", ko.String("app.server.address"))
 		if ko.String("app.server.socket") != "" {
-			colorlog.Green("Unix socket created at %s", ko.String("app.server.socket"))
+			lo.Info("server using Unix socket", "socket", ko.String("app.server.socket"))
 		}
 		if err := g.ListenAndServe(ko.String("app.server.address"), ko.String("app.server.socket"), s); err != nil {
-			log.Fatalf("error starting server: %v", err)
+			lo.Fatal("error starting server", "error", err)
 		}
 	}()
 
@@ -468,46 +474,46 @@ func main() {
 	<-ctx.Done()
 	closedAgentConns := wsHub.CloseAll()
 	closedLiveChatInboxes := inbox.CloseLiveChatClients()
-	colorlog.Red("Closed %d agent websocket connections and %d livechat inboxes.", closedAgentConns, closedLiveChatInboxes)
-	colorlog.Red("Shutting down HTTP server...")
+	lo.Info("realtime connections closed", "agent_connections", closedAgentConns, "livechat_inboxes", closedLiveChatInboxes)
+	lo.Info("shutting down HTTP server")
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), serverShutdownTimeout)
 	if err := s.ShutdownWithContext(shutdownCtx); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			colorlog.Red("HTTP server drain timed out after %s, exiting with connections still open: %v", serverShutdownTimeout, err)
+			lo.Warn("HTTP server drain timed out, exiting with connections still open", "timeout", serverShutdownTimeout, "error", err)
 		} else {
-			colorlog.Red("error shutting down HTTP server: %v", err)
+			lo.Error("error shutting down HTTP server", "error", err)
 		}
 	}
 	cancelShutdown()
 	if ing := app.ingester(); ing != nil {
-		colorlog.Red("Shutting down whatsapp ingester...")
+		lo.Info("shutting down whatsapp ingester")
 		ing.Close()
 	}
-	colorlog.Red("Shutting down AI agent...")
+	lo.Info("shutting down AI agent")
 	aiAgent.Close()
-	colorlog.Red("Shutting down AI...")
+	lo.Info("shutting down AI")
 	ai.Close()
-	colorlog.Red("Shutting down inboxes...")
+	lo.Info("shutting down inboxes")
 	inbox.Close()
-	colorlog.Red("Shutting down automation...")
+	lo.Info("shutting down automation")
 	automation.Close()
-	colorlog.Red("Shutting down autoassigner...")
+	lo.Info("shutting down autoassigner")
 	autoassigner.Close()
-	colorlog.Red("Shutting down notifier...")
+	lo.Info("shutting down notifier")
 	notifier.Close()
-	colorlog.Red("Shutting down webhook...")
+	lo.Info("shutting down webhook")
 	webhook.Close()
-	colorlog.Red("Shutting down conversation...")
+	lo.Info("shutting down conversation")
 	conversation.Close()
-	colorlog.Red("Shutting down SLA...")
+	lo.Info("shutting down SLA")
 	sla.Close()
-	colorlog.Red("Shutting down importer...")
+	lo.Info("shutting down importer")
 	app.importer.Close()
-	colorlog.Red("Shutting down database...")
+	lo.Info("shutting down database")
 	db.Close()
-	colorlog.Red("Shutting down redis...")
+	lo.Info("shutting down redis")
 	rdb.Close()
-	colorlog.Green("Shutdown complete.")
+	lo.Info("shutdown complete")
 }
 
 // onUsersOffline returns a callback for MonitorUserAvailability that broadcasts

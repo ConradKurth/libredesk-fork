@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/inbucket/html2text"
 	"github.com/yuin/goldmark"
@@ -88,6 +89,19 @@ func SanitizeUTF8(s string) string {
 	}
 	s = strings.ReplaceAll(s, "\x00", "")
 	return strings.ToValidUTF8(s, "�")
+}
+
+func TruncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 // GenerateSlug generates a URL-friendly slug from a title; a script with no ASCII form falls back to a random slug.
@@ -339,6 +353,15 @@ func SplitName(name string) (string, string) {
 		return fields[0], ""
 	}
 	return fields[0], strings.Join(fields[1:], " ")
+}
+
+// CapitalizeFirst uppercases the first letter of s and leaves the rest unchanged.
+func CapitalizeFirst(s string) string {
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError {
+		return s
+	}
+	return string(unicode.ToUpper(r)) + s[size:]
 }
 
 func htmlToText(html string, opts html2text.Options) string {

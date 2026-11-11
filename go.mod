@@ -28,7 +28,7 @@ require (
 	github.com/knadh/koanf/providers/posflag v0.1.0
 	github.com/knadh/koanf/providers/rawbytes v0.1.0
 	github.com/knadh/koanf/v2 v2.1.1
-	github.com/knadh/smtppool v1.1.0
+	github.com/knadh/smtppool/v2 v2.3.1
 	github.com/knadh/stuffbin v1.3.0
 	github.com/lib/pq v1.10.9
 	github.com/mackee/go-readability v0.3.1
@@ -49,12 +49,12 @@ require (
 	github.com/zerodha/logf v0.5.5
 	github.com/zerodha/simplesessions/stores/redis/v3 v3.0.0
 	github.com/zerodha/simplesessions/v3 v3.0.0
-	golang.org/x/crypto v0.52.0
-	golang.org/x/image v0.45.0
-	golang.org/x/mod v0.38.0
-	golang.org/x/net v0.55.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/image v0.47.0
+	golang.org/x/mod v0.42.0
+	golang.org/x/net v0.61.0
 	golang.org/x/oauth2 v0.27.0
-	golang.org/x/text v0.41.0
+	golang.org/x/text v0.43.0
 )
 
 require (
@@ -97,6 +97,6 @@ require (
 	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

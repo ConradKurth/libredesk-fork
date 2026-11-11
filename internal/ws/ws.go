@@ -150,6 +150,15 @@ func (h *Hub) ListSubscribers(uuid string) []*Client {
 	return out
 }
 
+// RetainSubscribers drops the conversation's subscribers whose agent is not in allowedAgentIDs.
+func (h *Hub) RetainSubscribers(uuid string, allowedAgentIDs []int) {
+	for _, c := range h.ListSubscribers(uuid) {
+		if !slices.Contains(allowedAgentIDs, c.ID) {
+			h.removeConversationSub(c, uuid)
+		}
+	}
+}
+
 // ClearClientSubs drops all of a client's list and open subscriptions.
 func (h *Hub) ClearClientSubs(client *Client) {
 	h.subsMu.Lock()
@@ -255,6 +264,23 @@ func (h *Hub) broadcastMessageLocal(msg models.BroadcastMessage) {
 func (h *Hub) BroadcastTypingToConversation(conversationUUID string, typingMsg models.TypingMessage) {
 	if h.conversationStore != nil && !typingMsg.IsPrivateMessage {
 		h.conversationStore.BroadcastTypingToWidgetClientsOnly(conversationUUID, typingMsg.IsTyping)
+	}
+}
+
+func (h *Hub) removeConversationSub(client *Client, uuid string) {
+	h.subsMu.Lock()
+	defer h.subsMu.Unlock()
+	delete(h.convSubsList[uuid], client)
+	if len(h.convSubsList[uuid]) == 0 {
+		delete(h.convSubsList, uuid)
+	}
+	delete(h.clientListSubs[client], uuid)
+	delete(h.convSubsOpen[uuid], client)
+	if len(h.convSubsOpen[uuid]) == 0 {
+		delete(h.convSubsOpen, uuid)
+	}
+	if h.clientOpenSub[client] == uuid {
+		delete(h.clientOpenSub, client)
 	}
 }
 

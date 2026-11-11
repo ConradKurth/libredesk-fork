@@ -1,9 +1,38 @@
 package stringutil
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+func TestTruncateUTF8(t *testing.T) {
+	texts := []string{
+		"",
+		strings.Repeat("a", 1100),
+		strings.Repeat("é", 550),
+		strings.Repeat("界", 400),
+		strings.Repeat("😀", 300),
+		strings.Repeat("aé界😀", 120),
+		"这是客服的测试回复：如果你在邮箱里看到这条，说明离线邮件已经打通。直接回复这封邮件，内容会回到这个会话里。",
+	}
+	for _, text := range texts {
+		for limit := -1; limit <= len(text)+1; limit++ {
+			got := TruncateUTF8(text, limit)
+			var want strings.Builder
+			for _, r := range text {
+				if want.Len()+utf8.RuneLen(r) > limit {
+					break
+				}
+				want.WriteRune(r)
+			}
+			if !utf8.ValidString(got) || got != want.String() {
+				t.Fatalf("limit %d: got %q, want %q", limit, got, want.String())
+			}
+		}
+	}
+}
 
 func TestWhatsAppPhoneForDialCode(t *testing.T) {
 	tests := []struct {
@@ -407,6 +436,27 @@ func TestSplitName(t *testing.T) {
 				t.Errorf("SplitName(%q) = (%q, %q), want (%q, %q)", tt.input, first, last, tt.wantFirst, tt.wantLast)
 			}
 		})
+	}
+}
+
+func TestCapitalizeFirst(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: ""},
+		{input: "thulasi", want: "Thulasi"},
+		{input: "Thulasi", want: "Thulasi"},
+		{input: "john.doe", want: "John.doe"},
+		{input: "123abc", want: "123abc"},
+		{input: "élodie", want: "Élodie"},
+		{input: "\xffabc", want: "\xffabc"},
+	}
+
+	for _, tt := range tests {
+		if got := CapitalizeFirst(tt.input); got != tt.want {
+			t.Errorf("CapitalizeFirst(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 func TestGenerateSlug(t *testing.T) {

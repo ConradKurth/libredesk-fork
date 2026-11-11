@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/mail"
 	"path/filepath"
 	"regexp"
@@ -23,9 +24,11 @@ import (
 	"github.com/abhinavxd/libredesk/internal/inbox"
 	"github.com/abhinavxd/libredesk/internal/inbox/channel/livechat"
 	whatsappChannel "github.com/abhinavxd/libredesk/internal/inbox/channel/whatsapp"
+	imodels "github.com/abhinavxd/libredesk/internal/inbox/models"
 	mmodels "github.com/abhinavxd/libredesk/internal/media/models"
 	"github.com/abhinavxd/libredesk/internal/sla"
 	"github.com/abhinavxd/libredesk/internal/stringutil"
+	tmpl "github.com/abhinavxd/libredesk/internal/template"
 	umodels "github.com/abhinavxd/libredesk/internal/user/models"
 	wmodels "github.com/abhinavxd/libredesk/internal/webhook/models"
 	"github.com/jmoiron/sqlx"
@@ -36,7 +39,8 @@ import (
 const (
 	maxMessagesPerPage = 500
 	// Only allow visitor-to-contact upgrade within this window after the last continuity email.
-	upgradeWindowTTL = 7 * 24 * time.Hour
+	upgradeWindowTTL    = 7 * 24 * time.Hour
+	maxPreviousMessages = 10
 )
 
 // Matches <img ... src="URL"> and captures the URL for downstream parsing.
@@ -57,6 +61,26 @@ type fromNameAgent struct{ FirstName, LastName, FullName string }
 const outgoingMessageLeaseSecs = 300
 
 type fromNameInbox struct{ Name string }
+
+// previousMessage is one earlier message exposed to the outgoing email template. String fields are HTML-escaped.
+type previousMessage struct {
+	SenderName  string
+	SenderEmail string
+	CreatedAt   time.Time
+	IsIncoming  bool
+	Content     string
+}
+
+type previousMessageRow struct {
+	CreatedAt   time.Time `db:"created_at"`
+	IsIncoming  bool      `db:"is_incoming"`
+	Content     string    `db:"content"`
+	TextContent string    `db:"text_content"`
+	ContentType string    `db:"content_type"`
+	FirstName   string    `db:"first_name"`
+	LastName    string    `db:"last_name"`
+	Email       string    `db:"email"`
+}
 
 // Run starts a pool of worker goroutines to handle message dispatching via inbox's channel and processes incoming messages. It scans for
 // pending outgoing messages at the specified read interval and pushes them to the outgoing queue to be sent.
@@ -126,7 +150,7 @@ func (m *Manager) IncomingMessageWorker(ctx context.Context) {
 				return
 			}
 			if _, err := m.ProcessIncomingMessage(msg); err != nil {
-				m.lo.Error("error processing incoming msg", "error", err)
+				m.lo.Error("error processing incoming message", "inbox_id", msg.InboxID, "channel", msg.Channel, "source_id", msg.SourceID.String, "error", err)
 			}
 		}
 	}
@@ -152,7 +176,7 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 	// Helper function to handle errors
 	handleError := func(err error, errorMsg string) bool {
 		if err != nil {
-			m.lo.Error(errorMsg, "error", err, "message_id", message.ID)
+			m.lo.Error(errorMsg, "error", err, "message_id", message.ID, "message_uuid", message.UUID, "conversation_uuid", message.ConversationUUID, "inbox_id", message.InboxID)
 			m.UpdateMessageStatus(message.UUID, models.MessageStatusFailed)
 			return true
 		}
@@ -181,7 +205,28 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 	outbound := message.ToOutbound()
 
 	if inb.Channel() == inbox.ChannelEmail {
-		outbound.From = m.emailFromAddress(inb, message)
+		inboxRecord, err := m.inboxStore.GetDBRecord(message.InboxID)
+		if handleError(err, "error fetching inbox sender addresses") {
+			return
+		}
+		selected := message.SendFrom()
+		if selected == "" {
+			selected = inboxRecord.From
+		}
+		selected, err = m.resolveSendFrom(message.ConversationUUID, inboxRecord, selected)
+		if handleError(err, "invalid email sender") {
+			return
+		}
+		outbound.From = m.emailFromAddress(inb, message, selected)
+		if len(messageArticleIDs(message.Meta)) > 0 {
+			outbound.AltContent = stringutil.HTML2TextMarkdownLinks(message.Content)
+		}
+
+		// Emails with no subject (e.g. arrived via IMAP with an empty Subject header) are
+		// rejected by some SMTP servers. Fall back to the reference number so replies go through.
+		if outbound.Subject == "" {
+			outbound.Subject = m.formatRefMarker(message.ReferenceNumber)
+		}
 
 		// Set "In-Reply-To" and "References" headers for email threading.
 		outbound.References, outbound.InReplyTo = m.BuildEmailThreadingHeaders(message.ConversationID, outbound.SourceID)
@@ -197,6 +242,11 @@ func (m *Manager) sendOutgoingMessage(message models.Message) {
 		return
 	}
 
+	if errors.Is(err, livechat.ErrClientNotConnected) {
+		m.lo.Info("outgoing message stored for offline widget", "message_uuid", message.UUID, "conversation_uuid", message.ConversationUUID, "inbox_id", message.InboxID)
+	} else {
+		m.lo.Info("outgoing message accepted by channel", "message_uuid", message.UUID, "conversation_uuid", message.ConversationUUID, "inbox_id", message.InboxID, "channel", inb.Channel())
+	}
 	// Update status as sent.
 	m.UpdateMessageStatus(message.UUID, models.MessageStatusSent)
 
@@ -304,49 +354,16 @@ func (m *Manager) BuildTemplateData(conversationUUID string, senderID int) (map[
 		return nil, fmt.Errorf("fetching message sender user: %w", err)
 	}
 
-	data := map[string]any{
-		"Conversation": map[string]any{
-			"ReferenceNumber": conversation.ReferenceNumber,
-			"Subject":         conversation.Subject.String,
-			"Priority":        conversation.Priority.String,
-			"UUID":            conversation.UUID,
-		},
-		"Contact": map[string]any{
-			"FirstName": conversation.Contact.FirstName,
-			"LastName":  conversation.Contact.LastName,
-			"FullName":  conversation.Contact.FullName(),
-			"Email":     conversation.Contact.Email.String,
-		},
-		"Recipient": map[string]any{
-			"FirstName": conversation.Contact.FirstName,
-			"LastName":  conversation.Contact.LastName,
-			"FullName":  conversation.Contact.FullName(),
-			"Email":     conversation.Contact.Email.String,
-		},
-		"Author": map[string]any{
-			"FirstName": sender.FirstName,
-			"LastName":  sender.LastName,
-			"FullName":  sender.FullName(),
-			"Email":     sender.Email.String,
-		},
-		// Lets templates disclose AI-composed replies, e.g. {{ if .IsAIComposed }}Composed by AI{{ end }}.
-		"IsAIComposed": sender.Type == umodels.UserTypeAIAssistant,
+	recipient := umodels.User{
+		FirstName: conversation.Contact.FirstName,
+		LastName:  conversation.Contact.LastName,
+		Email:     conversation.Contact.Email,
 	}
-
-	// For automated replies set author fields to empty strings as the recipients will see name as System.
-	if sender.IsSystemUser() {
-		data["Author"] = map[string]any{
-			"FirstName": "",
-			"LastName":  "",
-			"FullName":  "",
-			"Email":     "",
-		}
-	}
-
+	data := tmpl.BuildConversationData(conversation, recipient, sender)
+	data["Recipient"] = data["Contact"]
 	return data, nil
 }
 
-// RenderMessageInTemplate renders message content in the email base template for sending.
 func (m *Manager) RenderMessageInTemplate(channel string, message *models.Message) error {
 	switch channel {
 	case inbox.ChannelEmail:
@@ -355,28 +372,68 @@ func (m *Manager) RenderMessageInTemplate(channel string, message *models.Messag
 			return err
 		}
 
-		// Expose message meta flags to the template.
-		var (
-			isContinuity bool
-			meta         map[string]any
-		)
-		if len(message.Meta) > 0 && json.Unmarshal(message.Meta, &meta) == nil {
-			isContinuity, _ = meta["continuity_email"].(bool)
+		content := m.emailTemplateContent(message, data)
+		isContinuity, _ := data["IsContinuityEmail"].(bool)
+		if !isContinuity && m.template.DefaultOutgoingEmailTemplateContains("PreviousMessages") {
+			data["PreviousMessages"] = m.previousMessagesData(message.ConversationID, message.ID)
 		}
-		data["IsContinuityEmail"] = isContinuity
-
-		message.Content, err = m.template.RenderEmailWithTemplate(data, message.Content)
+		message.Content, err = m.template.RenderEmailWithTemplate(data, content)
 		if err != nil {
 			m.lo.Error("could not render email content using template", "id", message.ID, "error", err)
 			return fmt.Errorf("could not render email content using template: %w", err)
 		}
 	case inbox.ChannelLiveChat, inbox.ChannelWhatsApp:
+		m.RenderArticleReferences(message)
 		return nil
 	default:
 		m.lo.Warn("unknown message channel", "channel", channel)
 		return fmt.Errorf("unknown message channel: %s", channel)
 	}
 	return nil
+}
+
+func (m *Manager) emailTemplateContent(message *models.Message, data map[string]any) string {
+	content := articleCitationRegexp.ReplaceAllString(message.Content, "")
+	var (
+		isContinuity bool
+		meta         map[string]any
+	)
+	if len(message.Meta) > 0 && json.Unmarshal(message.Meta, &meta) == nil {
+		isContinuity, _ = meta["continuity_email"].(bool)
+	}
+	data["IsContinuityEmail"] = isContinuity
+	if isContinuity {
+		return content
+	}
+	return content + m.emailArticleReferences(message)
+}
+
+// previousMessagesData returns the conversation's earlier messages exchanged with the contact, newest first, with incoming reply chains removed.
+func (m *Manager) previousMessagesData(conversationID, messageID int) []previousMessage {
+	out := []previousMessage{}
+	var rows []previousMessageRow
+	if err := m.q.GetPreviousMessages.Select(&rows, conversationID, messageID, maxPreviousMessages); err != nil {
+		m.lo.Error("error fetching previous messages", "conversation_id", conversationID, "error", err)
+		return out
+	}
+	for _, r := range rows {
+		text := strings.TrimSpace(r.TextContent)
+		if r.IsIncoming {
+			text = textWithoutQuotedReplies(models.Message{Content: r.Content, TextContent: r.TextContent, ContentType: r.ContentType})
+		}
+		if text == "" {
+			continue
+		}
+		sender := umodels.User{FirstName: r.FirstName, LastName: r.LastName}
+		out = append(out, previousMessage{
+			SenderName:  html.EscapeString(strings.TrimSpace(sender.FullName())),
+			SenderEmail: html.EscapeString(r.Email),
+			CreatedAt:   r.CreatedAt,
+			IsIncoming:  r.IsIncoming,
+			Content:     strings.ReplaceAll(html.EscapeString(text), "\n", "<br>"),
+		})
+	}
+	return out
 }
 
 // GetConversationMessages retrieves messages for a specific conversation.
@@ -444,7 +501,9 @@ func (m *Manager) GetAllConversationMessages(conversationUUID string, private *b
 func (m *Manager) GetMessage(uuid string) (models.Message, error) {
 	var message models.Message
 	if err := m.q.GetMessage.Get(&message, uuid); err != nil {
-		m.lo.Error("error fetching message", "uuid", uuid, "error", err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			m.lo.Error("error fetching message", "uuid", uuid, "error", err)
+		}
 		return message, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 
@@ -586,16 +645,21 @@ func (m *Manager) ClearHandoffFormPending(messageUUID string) (bool, error) {
 	return n > 0, err
 }
 
+// RenderStaffTemplate fills template variables in text written by staff. Returns content unchanged on any error.
+func (m *Manager) RenderStaffTemplate(conversationUUID string, senderID int, content string) string {
+	data, err := m.BuildTemplateData(conversationUUID, senderID)
+	if err != nil {
+		return content
+	}
+	return m.template.RenderString(data, content)
+}
+
 // SendPrivateNote inserts a private message in a conversation.
 func (m *Manager) SendPrivateNote(media []mmodels.Media, senderID int, conversationUUID, content string, mentions []models.MentionInput) (models.Message, error) {
-	// Best-effort render template variables before saving.
-	if data, err := m.BuildTemplateData(conversationUUID, senderID); err == nil {
-		content = m.template.RenderString(data, content)
-	}
-
 	message := models.Message{
 		ConversationUUID: conversationUUID,
 		SenderID:         senderID,
+		UploadUserID:     senderID,
 		Type:             models.MessageOutgoing,
 		SenderType:       models.SenderTypeAgent,
 		Status:           models.MessageStatusSent,
@@ -621,11 +685,12 @@ func (m *Manager) SendPrivateNote(media []mmodels.Media, senderID int, conversat
 
 // CreateContactMessage creates a contact message in a conversation.
 // sourceID is the bare RFC 5322 Message-ID of the inbound message; it is normalized and stored on the message so replies thread on it, mirroring the IMAP ingestion path. Empty leaves the column NULL.
-func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, conversationUUID, content, contentType string, isNewConversation bool, sourceID string) (models.Message, error) {
+func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, conversationUUID, content, contentType string, isNewConversation bool, sourceID string, actorUserID int) (models.Message, error) {
 	sourceID = stringutil.NormalizeMessageID(sourceID)
 	message := models.Message{
 		ConversationUUID: conversationUUID,
 		SenderID:         contactID,
+		UploadUserID:     actorUserID,
 		Type:             models.MessageIncoming,
 		SenderType:       models.SenderTypeContact,
 		Status:           models.MessageStatusReceived,
@@ -648,7 +713,7 @@ func (m *Manager) CreateContactMessage(media []mmodels.Media, contactID int, con
 }
 
 // QueueReply queues a reply message in a conversation.
-func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID int, conversationUUID, content string, to, cc, bcc []string, metaMap map[string]interface{}) (models.Message, error) {
+func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID int, conversationUUID, content string, to, cc, bcc []string, sendFrom string, metaMap map[string]interface{}) (models.Message, error) {
 	var (
 		message = models.Message{}
 	)
@@ -664,11 +729,6 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 	}
 
 	isWhatsAppTemplate := inboxRecord.Channel == inbox.ChannelWhatsApp && extractInt(metaMap, "whatsapp_template_id") > 0
-	if !isWhatsAppTemplate {
-		if data, err := m.BuildTemplateData(conversationUUID, senderID); err == nil {
-			content = m.template.RenderString(data, content)
-		}
-	}
 
 	var (
 		sourceID    string
@@ -676,6 +736,11 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 	)
 	switch inboxRecord.Channel {
 	case inbox.ChannelEmail:
+		sendFrom, err = m.resolveSendFrom(conversationUUID, inboxRecord, sendFrom)
+		if err != nil {
+			return models.Message{}, err
+		}
+		metaMap["send_from"] = sendFrom
 		// Add `to`, `cc`, and `bcc` recipients to meta map.
 		to = stringutil.RemoveEmpty(to)
 		cc = stringutil.RemoveEmpty(cc)
@@ -730,6 +795,7 @@ func (m *Manager) QueueReply(media []mmodels.Media, inboxID, senderID, contactID
 	message = models.Message{
 		ConversationUUID:  conversationUUID,
 		SenderID:          senderID,
+		UploadUserID:      senderID,
 		Type:              models.MessageOutgoing,
 		SenderType:        models.SenderTypeAgent,
 		Status:            models.MessageStatusPending,
@@ -798,11 +864,11 @@ func (m *Manager) InsertMessageTx(tx *sqlx.Tx, message *models.Message) ([]strin
 
 	if err := tx.Stmtx(m.q.InsertMessage).Get(message, message.Type, message.Status, message.ConversationID, message.ConversationUUID, message.Content, message.TextContent, message.SenderID, message.SenderType,
 		message.Private, message.ContentType, message.SourceID, message.Meta); err != nil {
-		m.lo.Error("error inserting message in db", "error", err)
+		m.lo.Error("error inserting message in db", "inbox_id", message.InboxID, "conversation_uuid", message.ConversationUUID, "source_id", message.SourceID.String, "error", err)
 		return nil, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 
-	if err := m.mediaStore.LinkMessageMediaTx(tx, message.ID, message.Media, inlineUUIDs); err != nil {
+	if err := m.mediaStore.LinkMessageMediaTx(tx, message.ID, message.Media, inlineUUIDs, message.UploadUserID); err != nil {
 		return nil, envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
 	}
 	return inlineUUIDs, nil
@@ -810,7 +876,9 @@ func (m *Manager) InsertMessageTx(tx *sqlx.Tx, message *models.Message) ([]strin
 
 // AfterMessageInsert runs the post-commit side effects of a message insert: participant, last message and broadcast.
 func (m *Manager) AfterMessageInsert(message *models.Message, inlineUUIDs []string) {
-	// Add this user as a participant if not already present.
+	if message.Type == models.MessageIncoming {
+		m.lo.Info("incoming message stored", "message_uuid", message.UUID, "conversation_uuid", message.ConversationUUID, "inbox_id", message.InboxID, "source_id", message.SourceID.String)
+	}
 	m.addConversationParticipant(message.SenderID, message.ConversationUUID)
 
 	// Skip updating last_message and broadcasting for continuity emails.
@@ -1051,7 +1119,7 @@ func (m *Manager) ProcessIncomingMessage(in models.IncomingMessage) (models.Mess
 
 	// Upload message attachments. On failure, delete the conversation if it was just created for this message.
 	if upErr := m.uploadMessageAttachments(&msg); upErr != nil {
-		m.lo.Error("error uploading message attachments", "message_source_id", in.SourceID.String, "error", upErr)
+		m.deleteUploadedMedia(msg.Media)
 		if isNewConversation && conversationUUID != "" {
 			m.lo.Info("deleting conversation as message attachment upload failed", "conversation_uuid", conversationUUID, "message_source_id", in.SourceID.String)
 			if err := m.DeleteConversation(conversationUUID); err != nil {
@@ -1063,7 +1131,8 @@ func (m *Manager) ProcessIncomingMessage(in models.IncomingMessage) (models.Mess
 
 	// Insert message. On failure, delete the conversation if it was just created for this message.
 	if err = m.InsertMessage(&msg); err != nil {
-		m.lo.Error("error inserting incoming message", "message_source_id", in.SourceID.String, "conversation_uuid", conversationUUID, "is_new", isNewConversation, "error", err)
+		// The source keeps redelivering a message that never got saved, so its files must not stay behind.
+		m.deleteUploadedMedia(msg.Media)
 		if isNewConversation && conversationUUID != "" {
 			if delErr := m.DeleteConversation(conversationUUID); delErr != nil {
 				return models.Message{}, fmt.Errorf("deleting conversation after message insert failure: %w", delErr)
@@ -1568,6 +1637,20 @@ func (m *Manager) attachAttachmentsToMessage(message *models.Message) error {
 	return nil
 }
 
+// deleteUploadedMedia removes attachment files and their thumbnails uploaded for a message that was not saved.
+func (m *Manager) deleteUploadedMedia(media []mmodels.Media) {
+	for _, md := range media {
+		if err := m.mediaStore.Delete(md.UUID); err != nil {
+			m.lo.Error("error deleting media of unsaved message", "media_uuid", md.UUID, "error", err)
+		}
+		if strings.HasPrefix(md.ContentType, "image/") {
+			if err := m.mediaStore.Delete(image.ThumbPrefix + md.UUID); err != nil {
+				m.lo.Error("error deleting thumbnail of unsaved message", "media_uuid", md.UUID, "error", err)
+			}
+		}
+	}
+}
+
 // uploadThumbnailForMedia prepares and uploads a thumbnail for an image attachment.
 func (m *Manager) uploadThumbnailForMedia(media mmodels.Media, content []byte) error {
 	// Create a reader from the content
@@ -1660,7 +1743,7 @@ func (m *Manager) ProcessIncomingMessageHooks(message models.Message, isNewConve
 		}
 
 		if conversation.SLAPolicyID.Int == 0 {
-			m.lo.Info("no SLA policy applied to conversation, skipping next response SLA event creation")
+			m.lo.Debug("no SLA policy applied to conversation, skipping next response SLA event creation")
 			return nil
 		}
 		if deadline, err := m.slaStore.CreateNextResponseSLAEvent(conversation.ID, conversation.AppliedSLAID.Int, conversation.SLAPolicyID.Int, conversation.AssignedTeamID.Int); err != nil && !errors.Is(err, sla.ErrUnmetSLAEventAlreadyExists) {
@@ -1703,6 +1786,7 @@ func (m *Manager) broadcastMessageToWidgetClients(message *models.Message) {
 		CreatedAt:        message.CreatedAt,
 		Content:          message.Content,
 		TextContent:      message.TextContent,
+		ContentType:      message.ContentType,
 		Author:           message.Author,
 		Attachments:      message.Attachments,
 		Meta:             message.Meta,
@@ -1742,10 +1826,15 @@ func (m *Manager) findExistingMedia(rawContentID, conversationUUID string) (stri
 	return storedCID, exists, mediaUUID
 }
 
-// emailFromAddress returns the From header, applying the inbox from-name template for agent senders
-// Falls back to the inbox's default from address if the template is empty, the sender is not an agent, or any errors occur.
-func (m *Manager) emailFromAddress(inb inbox.Inbox, message models.Message) string {
+// emailFromAddress returns the From header for the sender address, named after the inbox From or the from-name template for agents.
+func (m *Manager) emailFromAddress(inb inbox.Inbox, message models.Message, sender string) string {
 	from := inb.FromAddress()
+	if emailInbox, ok := inb.(inbox.EmailInbox); ok && sender != emailInbox.PrimaryAddress() {
+		from = sender
+		if addr, err := mail.ParseAddress(inb.FromAddress()); err == nil && addr.Name != "" {
+			from = (&mail.Address{Name: addr.Name, Address: sender}).String()
+		}
+	}
 
 	tpl := inb.FromNameTemplate()
 	if tpl == "" || message.SenderType != models.SenderTypeAgent {
@@ -1796,4 +1885,34 @@ func (m *Manager) emailFromAddress(inb inbox.Inbox, message models.Message) stri
 	}
 	addr.Name = name
 	return addr.String()
+}
+
+func (m *Manager) resolveSendFrom(conversationUUID string, inboxRecord imodels.Inbox, requested string) (string, error) {
+	sendable, err := inbox.SendableEmailAddresses(inboxRecord.From, inboxRecord.Aliases)
+	if err != nil {
+		m.lo.Error("error resolving inbox sender addresses", "inbox_id", inboxRecord.ID, "error", err)
+		return "", envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
+	}
+
+	if requested != "" {
+		normalized, err := inbox.NormalizeEmailAddress(requested)
+		if err != nil || !slices.Contains(sendable, normalized) {
+			return "", envelope.NewError(envelope.InputError, m.i18n.T("validation.invalidEmail"), nil)
+		}
+		return normalized, nil
+	}
+
+	var latest models.Message
+	if err := m.q.GetEmailSenderMessage.Get(&latest, conversationUUID); err != nil && err != sql.ErrNoRows {
+		m.lo.Error("error fetching latest message for sender address", "conversation_uuid", conversationUUID, "error", err)
+		return "", envelope.NewError(envelope.GeneralError, m.i18n.T("globals.messages.somethingWentWrong"), nil)
+	}
+	previous := latest.SendFrom()
+	if latest.Type == models.MessageIncoming {
+		previous = latest.InboxAddress()
+	}
+	if normalized, err := inbox.NormalizeEmailAddress(previous); err == nil && slices.Contains(sendable, normalized) {
+		return normalized, nil
+	}
+	return sendable[0], nil
 }
