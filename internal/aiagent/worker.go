@@ -1106,9 +1106,10 @@ func splitSuggestions(answer string) (string, []string) {
 var bareSuggestionsLine = regexp.MustCompile(`^\[?\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\]?,?$`)
 
 // trailingSuggestionsArray matches an options array the model appended to a sentence instead of
-// putting it on its own line, after a space or straight after the punctuation (group 1 is the array):
-// Did that answer your question? ["Yes, that's helpful","No, I need more help"], or question?["Yes","No"].
-var trailingSuggestionsArray = regexp.MustCompile(`(?:\s|[?.!:])(\[\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\],?)$`)
+// putting it on its own line, after a space or straight after the punctuation, with or without a
+// comma (group 1 is the array): Did that answer your question? ["Yes, that's helpful","No, I need
+// more help"], question?["Yes","No"], or question?,["Yes","No"] (email, 2026-11-17).
+var trailingSuggestionsArray = regexp.MustCompile(`(?:\s|[?.!:],?)(\[\s*"[^"\n]{1,80}"(?:\s*,\s*"[^"\n]{1,80}"){1,4}\s*\],?)$`)
 
 // blankLineRun collapses the gap left where an options line was removed.
 var blankLineRun = regexp.MustCompile(`\n[ \t]*\n(?:[ \t]*\n)+`)
@@ -1128,7 +1129,7 @@ func splitBareSuggestions(answer string) (body, payload string) {
 				lines[i-1] = strings.TrimSuffix(strings.TrimRight(lines[i-1], " \t"), ",")
 			}
 		} else if m := trailingSuggestionsArray.FindStringSubmatchIndex(line); m != nil {
-			found, lines[i] = line[m[2]:m[3]], strings.TrimSpace(line[:m[2]])
+			found, lines[i] = line[m[2]:m[3]], strings.TrimSuffix(strings.TrimSpace(line[:m[2]]), ",")
 		} else {
 			continue
 		}

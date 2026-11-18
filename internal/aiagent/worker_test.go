@@ -56,6 +56,9 @@ func TestSplitSuggestionsBareArray(t *testing.T) {
 		// Glued to the question mark with no space (email, 2026-11-11).
 		{"Standard shipping takes 2-5 business days.\n\nPlease reply to this email.\nDid that answer your question?[\"Yes, thanks\",\"No, I need more info\"]",
 			"Standard shipping takes 2-5 business days.\n\nPlease reply to this email.\nDid that answer your question?"},
+		// Glued to the question mark with a comma between (email, 2026-11-17).
+		{"Charge it for at least 1 hour.\n\nDid that resolve your question?,[\"Yes, it works now\",\"I need to send the video\"]",
+			"Charge it for at least 1 hour.\n\nDid that resolve your question?"},
 		// On its own line above the footer.
 		{"Which device are you using?\n\n [\"Gust Core\",\"Lightning\"]  \n\nPlease reply to this email.",
 			"Which device are you using?\n\nPlease reply to this email."},
@@ -75,6 +78,7 @@ func TestSplitSuggestionsKeepsOrdinaryText(t *testing.T) {
 		"Pick one:\n\"Mint\"",
 		"Choose \"Mint\" or \"Lush Ice\" at checkout.",
 		"Flavors in the kit:[\"Mint\",\"Lush Ice\"] and more.",
+		"Flavors in the kit:,[\"Mint\",\"Lush Ice\"] and more.",
 	} {
 		if body, suggestions := splitSuggestions(in); body != in || suggestions != nil {
 			t.Fatalf("%q: got body %q suggestions %#v", in, body, suggestions)
